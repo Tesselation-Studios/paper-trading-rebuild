@@ -351,7 +351,27 @@ if t_stat < 1.96:  # 95% confidence
 
 ---
 
-## §7 — Knowledge Sharing
+## §7 — Knowledge Sharing & Skill Evolution
+
+### 7.0 Trader Skill Profiles
+
+Each trader has a distinct starting toolkit. Tools are locked — a trader can't use what it doesn't have. But it can request access through the learning loop.
+
+```
+Trader skill profiles (initial):
+  Kairos:   momentum_tools, RSI, MACD, volume_profile
+  Aldridge: value_tools, P/E_screening, dividend_analysis, sector_rotation
+  Stonks:   sentiment_tools, news_scraping, social_signals, fear_greed
+```
+
+**Tool request workflow:**
+1. Trader journals: "I see a pattern I can't capture with my current tools. I need {tool}."
+2. Casper reviews: is this tool appropriate? Does it overlap with another trader?
+3. If approved: tool added to trader's skill manifest in agents repo
+4. Tool usage tracked per trade: did using this tool improve outcomes?
+5. If unused for 30 days: tool revoked
+
+This creates natural divergence without artificial constraints. Traders converge on strategy but diverge on tool access based on what they prove works.
 
 ### 7.1 Signal Board
 
@@ -802,10 +822,73 @@ Step 10: Agent Journal
 
 ---
 
-## §21 — Open Questions
+## §21 — Resolved Design Decisions
 
-1. **Gradient step size**: Start at 0.01 per tick. Too aggressive? Test with replay before going live.
-2. **Prompt sweep variant count**: 100 per night? 20? Depends on Docker capacity and API costs.
-3. **Auto-merge threshold**: 5% Calmar improvement for auto-merge. Too aggressive? Start at 10% and reduce if safe.
-4. **Trader strategy divergence**: How different should Kairos/Aldridge/Stonks be? Should we enforce diversification or let them converge?
-5. **Multi-timeframe**: Currently using daily bars. Should the signal engine process 1-min, 5-min, and daily bars simultaneously?
+### 21.1 Gradient Step Size — Aggressive
+
+Start at **0.03 per tick** (3× original proposal). Rationale: 5 months in and traders haven't delivered. A momentum threshold at 0.55 with ±0.03 per tick moves across the full range [0.3, 0.9] in ~20 ticks (about 1 week). Fast enough to matter, bounded enough to not destroy.
+
+Still constrained by:
+- Max parameter change per tick: 8% of range
+- Minimum 3 ticks between changes to same parameter
+- All changes logged with before/after scores
+
+This is itself a meta-parameter: `gradient.learning_rate` in config, tunable over time.
+
+### 21.2 Prompt Sweep Variant Count
+
+**100 variants per night**, scaling to 200 if Mac Ollama throughput allows. Each replay uses yesterday's data (see §21.5). Cost ceiling: $0.25/night for API inference, $0 for Ollama workers.
+
+### 21.3 Auto-Merge Thresholds — Tiered
+
+All thresholds are tunable parameters in `learning_loop.auto_merge` config:
+
+| Calmar Improvement | Action |
+|---|---|
+| > 10% | Auto-merge, no human needed |
+| 5–10% | Auto-merge with notification to Telegram |
+| 1–5% | PR created, labeled `needs-review` |
+| < 1% | No PR (below noise floor) |
+
+### 21.4 Trader Strategy — Converge Allowed, Tools Diverge
+
+Traders are allowed to converge on similar strategies. Correlation is monitored but not prevented.
+
+**Tool-based divergence**: Each trader starts with different tool access and can request new tools through the learning loop. A trader that's succeeding with a specific tool keeps it. A trader that wants to experiment requests access.
+
+```
+Trader skill profiles (initial):
+  Kairos:   momentum tools, RSI, MACD
+  Aldridge: value tools, P/E screening, dividend analysis
+  Stonks:   sentiment tools, news scraping, social media signals
+
+Learning loop addition:
+  - Trader can propose: "I want access to {tool}"
+  - Proposal includes: why it helps, expected impact
+  - Casper reviews and approves/denies
+  - Approved tools added to trader's skill manifest
+  - Tool usage tracked per trade for effectiveness scoring
+```
+
+This means the skill system is part of the learning loop. A trader that never uses a tool loses it. A trader that proves a tool's value keeps it and shares the evidence.
+
+### 21.5 Replay Harness — Always Default to Yesterday
+
+The replay harness always replays the most recent complete trading day by default. No guessing date ranges.
+
+```bash
+# Default: replay yesterday
+python replay.py --trader kairos
+
+# Go back N days
+python replay.py --trader kairos --days-back 5
+
+# Specific date range (rare, for debugging)
+python replay.py --trader kairos --from 2026-06-15 --to 2026-06-20
+```
+
+Data storage on TrueNAS is organized by date: `market_data/bars/YYYY/MM/DD/`. The replay harness reads the requested day(s), builds the market state, and feeds it to the trader. This makes the nightly sweep dead simple: always replay yesterday, always.
+
+### 21.6 Timeframe
+
+Daily bars for the signal engine. 5-min bars provided to the LLM trader as supplementary intraday context. Gradient descent operates on daily-level parameters only. Add intraday parameters (entry/exit timing within the day) as a future phase once daily-level system is stable.
