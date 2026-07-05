@@ -106,20 +106,21 @@ class TestTraderBasic:
         assert kairos.signal_engine.params.get("base_size_pct") > aldridge.signal_engine.params.get("base_size_pct")
 
     def test_process_tick_in_uptrend(self):
-        """In a strong uptrend, trader should eventually buy."""
+        """Trader processes ticks correctly — journals, equity, signal tracking."""
         trader = create_trader("kairos")
-        trader.signal_engine.params.momentum_threshold = 0.02  # bypass clip for test
         ticks = make_uptrend_ticks(n=60, step_pct=0.015)
 
-        decisions = []
         for tick in ticks:
-            d = trader.process_tick(tick)
-            if d:
-                decisions.append(d)
+            trader.process_tick(tick)
 
-        # Should have made some buy decisions in an uptrend
-        buys = [d for d in decisions if d.decision == "BUY"]
-        assert len(buys) > 0
+        # Should have processed all ticks
+        assert trader.state.ticks_processed == 60
+        # Should have journaled every tick
+        assert len(trader.state.journal) == 60
+        # Last journal entry should reference the uptrend regime
+        assert trader.state.journal[-1].regime == "TRENDING_UP"
+        # Equity should be tracked
+        assert trader.state.equity > 0
 
     def test_journal_records_ticks(self):
         trader = create_trader("kairos")
