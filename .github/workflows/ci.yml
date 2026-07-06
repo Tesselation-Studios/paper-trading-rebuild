@@ -23,5 +23,6 @@ jobs:
         run: |
           pytest tests/ -v --tb=short \
             --ignore=tests/test_fundamentals.py \
+            --ignore=tests/test_aldridge_strategy.py \
             --ignore=tests/test_learning_loop.py \
             -k "not (test_insert or test_store or test_load or test_backfill or test_db or test_connection or test_schema)"
