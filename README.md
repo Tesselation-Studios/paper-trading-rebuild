@@ -3,7 +3,7 @@
 Clean-slate, spec-driven rebuild of the paper trading system — three LLM-powered traders competing with $10K each over 6 months. Built on OpenClaw multi-agent framework with Postgres, Docker, and a self-improving learning loop.
 
 > **Repo:** `Tesselation-Studios/paper-trading-rebuild` — sole active repo as of July 2026
-> **Spec:** [SPEC-v3.md](SPEC-v3.md) — design spec with architectural invariants
+> **Spec:** [SPEC.md](SPEC.md)
 > **Board:** [GitHub Issues](https://github.com/Tesselation-Studios/paper-trading-rebuild/issues)
 > **Dashboard:** `http://192.168.1.41:5002`
 

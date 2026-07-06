@@ -1,8 +1,11 @@
-# SPEC-v3: Self-Improving Paper Trading System
+# SPEC: Self-Improving Paper Trading System
 
-> **Status:** Design phase — not yet built. Supersedes SPEC-v2.
+> **META-SPEC**: [ai-project-system v0.22](https://github.com/openclaw/openclaw/blob/main/docs/ai-project-system/META-SPEC.md)
+> **Repo**: `Tesselation-Studios/paper-trading-rebuild`
+> **Status:** Built + evolving — traders live, learning loop active, Postgres migration in progress
 > **Goal:** Three AI traders (Kairos, Aldridge, Stonks) that measurably improve over time through two-speed learning, validated by rigorous out-of-sample testing, running on distributed hardware.
 > **Success criterion:** 90-day rolling Calmar ratio > SPY buy-and-hold, with max drawdown < 15%.
+> **Last updated:** 2026-07-06
 
 ---
 
@@ -70,7 +73,7 @@
 | Machine | Role | Resources |
 |---------|------|-----------|
 | **Hermes** (.131) | Orchestrator, spec-keeper, PR reviewer | Coordinates, fixes breakages |
-| **OpenClaw** (.73) | Agent host — traders live here | Claude/Gemini via API |
+| **OpenClaw** (.41) | Agent host — traders live here | Claude/Gemini via API |
 | **Docker** (.179) | Backtest workers, replay harness | 20 parallel containers |
 | **Mac** (.237) | Ollama inference for prompt sweeps | Free local inference |
 | **TrueNAS** (.96) | Data lake | Historical data, trade DB, equity curves |
