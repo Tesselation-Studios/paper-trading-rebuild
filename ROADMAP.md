@@ -87,7 +87,7 @@ Trades flow, but with bugs that corrupt data, waste tokens, or cause wrong decis
 
 | # | Issue | Owner | Blocked? | Action |
 |---|-------|-------|----------|--------|
-| **28** | Fix DB drift — `schema.sql` vs reality (Postgres tables don't match spec) | Hermes | Nothing | Diff `src/db/schema.sql` against live Postgres; generate migration; apply |
+| **28** | Fix DB drift — `schema.sql` vs reality (Postgres tables don't match spec) | Hermes | Nothing | ✅ Fixed `0bf231b`. Resolved 14 diffs: core schema now matches live docker.klo. Added fundamentals table, missing columns across 11 tables. |
 | **29** | D-state alert for stuck traders — no alert when trader hasn't produced a decision in N ticks | Hermes | Nothing | Add D-state monitor to Hermes watchdog cron; alert if trader silent > 3 ticks |
 
 ---
@@ -190,7 +190,7 @@ These are Casper-owned items from his backlog that aren't captured in GitHub iss
 - [x] Fix #53: Volume filter bypass in CHOPPY + Extreme Fear (`src/signals.py`) ✅ `63eeb03`
 - [x] Fix #45: Entry gate should allow SELL (`src/risk/gates.py`) ✅ `b6cddb5`
 - [x] Fix #42: Backfill ADBE stop-loss; add assertion ✅ `7b34ecb`
-- [ ] Fix #28: Diff schema.sql vs live Postgres, generate migration
+- [x] Fix #28: Diff schema.sql vs live Postgres, generate migration ✅ `0bf231b`
 
 ### Hermes — After P0
 - [ ] Fix #52/#44: Unify learning loop format
