@@ -67,7 +67,7 @@ class TestSignalParams:
         assert "momentum_threshold" in names
         assert "rsi_oversold" in names
         assert "stop_loss_pct" in names
-        assert len(names) == 18  # 18 tunable params
+        assert len(names) == 19  # 19 tunable params (incl volume_threshold)
 
     def test_get_set(self):
         p = SignalParams()
@@ -123,7 +123,7 @@ class TestSignalParams:
         d = p.to_dict()
         assert d["momentum_threshold"] == 0.55
         assert d["max_positions"] == 5
-        assert len(d) == 18
+        assert len(d) == 19
 
     def test_from_dict(self):
         d = {"momentum_threshold": 0.8, "stop_loss_pct": 0.03, "max_positions": 3}

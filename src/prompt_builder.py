@@ -29,7 +29,7 @@ KAIROS_DEFAULTS = AgentFiles(
         "and RSI is not overbought (<70). Sell when momentum turns negative "
         "or RSI exceeds 80. Hold otherwise.\n\n"
         "## Rules\n"
-        "- Check volume before buying — low volume signals are unreliable\n"
+        "- Volume filter: only enter when volume ≥ 1.2x 20-day average — don't miss entries waiting for volume perfection\n"
         "- Never exceed 20% of portfolio in one position\n"
         "- Journal every decision with conviction and rationale\n"
         "- If uncertain (conviction < 0.3), default to HOLD"

@@ -63,6 +63,9 @@ class SignalParams:
     rsi_overbought: float = 70.0           # [60, 85]
     bollinger_std: float = 2.0             # [1.0, 3.0]
 
+    # Volume
+    volume_threshold: float = 1.2          # [0.5, 3.0]  min volume / 20d avg volume
+
     # Volatility
     vol_regime_threshold: float = 0.25     # [0.1, 0.5]
     vol_reduction_multiplier: float = 0.7  # [0.3, 1.0]
@@ -92,6 +95,7 @@ class SignalParams:
         "rsi_oversold": ParamBound(30.0, 15.0, 40.0),
         "rsi_overbought": ParamBound(70.0, 60.0, 85.0),
         "bollinger_std": ParamBound(2.0, 1.0, 3.0),
+        "volume_threshold": ParamBound(1.2, 0.5, 3.0),
         "vol_regime_threshold": ParamBound(0.25, 0.1, 0.5),
         "vol_reduction_multiplier": ParamBound(0.7, 0.3, 1.0),
         "base_size_pct": ParamBound(0.15, 0.05, 0.30),
