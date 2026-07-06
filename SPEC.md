@@ -1,10 +1,13 @@
 # SPEC: Self-Improving Paper Trading System
 
-> **Status:** Design phase — not yet built. This is the canonical spec (consolidated from SPEC-v3).
+> **META-SPEC**: [ai-project-system v0.22](https://github.com/openclaw/openclaw/blob/main/docs/ai-project-system/META-SPEC.md)
+> **Repo**: `Tesselation-Studios/paper-trading-rebuild`
+> **Status:** Built + evolving — traders live, learning loop active, Postgres migration in progress
 > **Goal:** Three AI traders (Kairos, Aldridge, Stonks) that measurably improve over time through two-speed learning, validated by rigorous out-of-sample testing, running on distributed hardware.
 > **Success criterion:** 90-day rolling Calmar ratio > SPY buy-and-hold, with max drawdown < 15%.
+> **Last updated:** 2026-07-06
 
-> **META-SPEC compliance:** This document satisfies the META-SPEC structure:
+> **META-SPEC compliance:**
 > - **Purpose** — see below
 > - **Architecture** — §1
 > - **Components** — §§2–24
@@ -82,7 +85,7 @@ Build a self-improving paper trading system where three AI traders measurably ge
 | Machine | Role | Resources |
 |---------|------|-----------|
 | **Hermes** (.131) | Orchestrator, spec-keeper, PR reviewer | Coordinates, fixes breakages |
-| **OpenClaw** (.73) | Agent host — traders live here | Claude/Gemini via API |
+| **OpenClaw** (.41) | Agent host — traders live here | Claude/Gemini via API |
 | **Docker** (.179) | Backtest workers, replay harness | 20 parallel containers |
 | **Mac** (.237) | Ollama inference for prompt sweeps | Free local inference |
 | **TrueNAS** (.96) | Data lake | Historical data, trade DB, equity curves |
@@ -781,7 +784,7 @@ Step 10: Agent Journal
 ## §19 — Phased Implementation
 
 ### Phase 0: Foundation (✅ Done)
-- Clean repo, green CI, SPEC.md (this document)
+- Clean repo, green CI, SPEC-v3 (this document)
 - Placeholder test, config skeletons
 
 ### Phase 1: Config Isolation + Signal Engine
@@ -1138,3 +1141,391 @@ Both the rule-based (§5) and unsupervised (§24) regime detectors run in parall
 - When: K-Means with K=4 is run
 - Then: 4 distinct clusters found
 - And: each day assigned to exactly one cluster
+
+---
+
+## §26 — Agent File Architecture
+
+How OpenClaw agents structure their knowledge. This is what the simulation engine simulates.
+
+### 26.1 File Types and Purposes
+
+| File | Where | Purpose | Changing Frequency |
+|------|-------|---------|-------------------|
+| `AGENTS.md` | `agent/AGENTS.md` | Operating manual: what the agent owns, its principles, escalation rules, how it operates | Occasionally (learns a better workflow) |
+| `SOUL.md` | `agent/SOUL.md` | Personality and voice: how the agent thinks, speaks, and journals | Rarely (identity is stable) |
+| `IDENTITY.md` | `agent/IDENTITY.md` | Metadata: name, emoji, creature type, vibe | Almost never |
+| `TOOLS.md` | `agent/TOOLS.md` | Local notes: SSH hosts, API endpoints, device nicknames — environment-specific | When infrastructure changes |
+| `MEMORY.md` | `agent/MEMORY.md` | Persistent learnings: what went well yesterday, news to watch, market observations | Daily (written during nightly reflection) |
+| `SKILL.md` | `skills/<name>/SKILL.md` | Tool procedures: how to use Alpaca API, how to compute RSI, how to execute a trade. Reusable across agents. | When a better procedure is discovered |
+
+### 26.2 Skill vs Agent File
+
+**Skills are SHARED procedures.** `skill-alpaca-kairos` teaches Kairos how to use the Alpaca API. Multiple agents can load the same skill. Skills say "here's how you do X."
+
+**Agent files are PERSONAL context.** AGENTS.md says "you are Kairos, you trade momentum." SOUL.md says "you're confident, aggressive, journal in first person." They differ per agent.
+
+### 26.3 Prompt Assembly Order
+
+When an OpenClaw agent receives a tick, its prompt is assembled as:
+
+```
+[IDENTITY.md]        → "I am Kairos. I trade momentum."
+[AGENTS.md]          → "My job: read signals, decide BUY/SELL/HOLD, journal."
+[SOUL.md]            → "I'm confident. I stick to what's proven."
+[SKILL.md files]     → "Here's how to use Alpaca. Here's how to compute signal strength."
+[TOOLS.md]           → "Alpaca endpoint: https://paper-api.alpaca.markets. My key is in ENV."
+[MEMORY.md]          → "Yesterday AAPL broke out. Watching for follow-through."
+[JOURNAL entries]    → Last 10 tick decisions and rationales
+[TICK DATA]          → Current price, RSI, momentum, regime, portfolio state
+```
+
+### 26.4 Prompt Size Constraint
+
+OpenClaw limits prompt size. Smaller is always better. The simulation must respect this:
+
+- **Target:** Under 3,000 tokens for the full assembled prompt
+- **Strategy:** Push technical detail into skills (loaded on demand, not always in context). Keep AGENTS.md and SOUL.md tight.
+- **Journal:** Cap at last 10 entries. Trim rationales to one sentence.
+- **Skills:** Reference by name with 1-line summary, not full procedure text.
+
+### 26.5 What Gets Tweaked Overnight
+
+| File | Tweaked? | How |
+|------|----------|-----|
+| AGENTS.md | Yes | Rule changes: "buy when momentum > 0.6" → "buy when momentum > 0.5 AND RSI < 70" |
+| SOUL.md | Rarely | Shift emphasis: "be aggressive" → "be patient" |
+| TOOLS.md | No | Updated only when infrastructure changes |
+| MEMORY.md | Read-only | Read during simulation, not written back |
+| SKILL.md | Yes | Procedure improvements: "use limit orders not market orders" |
+| IDENTITY.md | No | Never changes |
+
+---
+
+## §27 — Simulation & Learning Engine
+
+The overnight training system. Runs hundreds of prompt × parameter × regime scenarios on
+a growing window of historical data. The system proposes its own hypotheses, tests them, and
+promotes what works — the trader agents learn without daily human tweaking.
+
+### 27.1 Scale
+
+**Hundreds of scenarios every night.** Not 20 conservative variants. The full matrix:
+
+```
+3 traders
+  × 5-10 prompt variants (AGENTS.md tweaks)
+  × 3-5 param configurations (signal engine thresholds)
+  × 4 regime contexts (TRENDING_UP, TRENDING_DOWN, MEAN_REVERTING, HIGH_VOL)
+  × growing data window (5 days fast, 30 days deep, 90 days weekend)
+```
+
+| Pipeline | Scenarios | Data Window | Model | Cost Est. |
+|----------|-----------|-------------|-------|-----------|
+| **Fast screen** (nightly) | ~150-300 | 5 days | v4-flash | ~$0.10 |
+| **Deep validation** (nightly, top candidates) | ~15-25 | 30 days | v4-flash | ~$0.08 |
+| **Weekend sweep** (top performers) | ~5-10 | 90 days | v4-pro + flash | ~$0.15 |
+| **Total weekly** | ~1,200 scenarios | | | ~$1.50 |
+
+### 27.2 What Gets Tested
+
+Each scenario varies:
+
+**Prompt axis** (changes to AGENTS.md and SKILL.md):
+- Decision rules: "buy when momentum > 0.6" → different thresholds, added conditions
+- Tool usage: "use limit orders" vs "use market orders", "check sector first" vs "check volume first"
+- Risk posture: "aggressive" vs "defensive" framing in SOUL.md
+- Journal style: detailed vs terse rationales (affects context window utilization)
+- Skill references: which skills are loaded in which order
+
+**Parameter axis** (signal engine numbers):
+- `momentum_threshold`, `rsi_oversold`, `base_size_pct`, `stop_loss_pct`
+- `conviction_multiplier`, `max_positions`, regime weights
+- Bounded, continuous, safe ranges only
+
+**Regime axis** (market context filter):
+- Run scenarios tagged by regime to discover: "does this prompt+param combo work in ALL regimes or only TRENDING_UP?"
+- If a combo excels in one regime but tanks in another → regime-scoped config
+
+### 27.3 Autonomous Hypothesis Generation
+
+The system doesn't just test human-proposed variants. It proposes its own:
+
+```
+Nightly analysis:
+  1. Load last night's results (all scenarios, all scores)
+  2. Group by: trader, regime, prompt variant, param config
+  3. Find patterns:
+     - "Kairos scores +0.15 better when momentum_threshold > 0.55 in TRENDING_UP"
+     - "Aldridge's 'check sector ETF' prompt scores -0.08 vs baseline — hurts value strategy"
+     - "Stonks Calmar drops when position_size > 0.15 in HIGH_VOL"
+  4. Generate hypotheses:
+     - "If momentum_threshold=0.65 AND 'check volume first', Kairos might do better"
+     - "If we remove 'sector check' for Aldridge but add 'PE < industry avg'..."
+  5. Queue hypotheses as new scenarios for next night
+```
+
+This means the active variant list grows organically. Winners persist, losers drop out,
+new ideas generated from patterns. Human review optional but not required.
+
+### 27.4 Growing Data Window
+
+The simulation window expands as days pass:
+
+```
+Day 1:   replay yesterday (5 scenarios/day → 5 total ticks)
+Day 7:   replay last 5 days (25 ticks)
+Day 14:  replay last 10 days (50 ticks)
+Day 30:  replay last 20 days (100 ticks)
+Day 90:  replay last 60 days (300 ticks) — weekend deep sweep
+```
+
+Each night, the growing window means more statistical confidence. A variant that
+scores well on 5 days might regress on 30. The system learns this and adapts.
+
+### 27.5 Trader Strategy Optimization
+
+Each trader's AGENTS.md encodes their strategy. The simulation optimizes within
+that strategy, not against it:
+
+| Trader | Strategy | What Gets Optimized |
+|--------|----------|--------------------|
+| **Kairos** (momentum) | Buy strength, ride trends | Momentum thresholds, trend confirmation rules, conviction scaling |
+| **Aldridge** (value) | Buy undervalued, wait | Value signal weights, patience rules, multi-position sizing |
+| **Stonks** (sentiment) | Follow narrative, act fast | Sentiment thresholds, entry/exit speed, meme filtering |
+
+The system never says "Kairos should trade value." It says "Kairos's momentum
+works best with these thresholds in this regime."
+
+### 27.6 Tool Proficiency Learning
+
+Traders have tools (skills). The simulation discovers which tools produce edge:
+
+```
+For each trader:
+  For each skill they have access to:
+    Run scenarios WITH the skill loaded vs WITHOUT
+    Measure: does having this skill improve Calmar?
+
+  Result:
+    skill-alpaca-kairos:   +0.12 Calmar (essential)
+    stock-analysis:         +0.08 Calmar (useful)
+    sell-the-news:          -0.03 Calmar (maybe harmful — over-cautious on good news?)
+    self-improvement:       +0.01 Calmar (marginal)
+
+  → System proposes: drop sell-the-news, keep others
+  → If sustained for 5+ nights: auto-remove skill from config
+```
+
+### 27.7 Journal as Learning Signal
+
+The journal isn't just context for the next tick — it's training data:
+
+```
+After a simulation run, analyze the journal:
+  - Which decisions had high conviction but lost? (overconfidence)
+  - Which had low conviction but won? (underconfidence — missed sizing)
+  - Do journal entries become more accurate over the day? (learning)
+  - Does the agent contradict itself? ("buying AAPL" at 10am, "AAPL overvalued" at 2pm)
+
+This analysis feeds back into AGENTS.md:
+  "You tend to be overconfident early in the day. Consider smaller first positions."
+```
+
+### 27.8 Weekly Summary & Auto-Promotion
+
+Every Monday morning, the system produces a summary of the past week's learning:
+
+```
+Week of July 5-11:
+
+Kairos — 1,247 scenarios tested
+  Best combo: momentum_threshold=0.62 + "check volume first" + limit orders
+  Calmar improvement: +0.18 over baseline (sustained 5 nights)
+  → AUTO-PROMOTED to main. New version: kairos/v1.2.0
+
+Aldridge — 1,103 scenarios tested
+  Best combo: PE_gate=15 + "wait for pullback" + 5 max positions
+  Calmar improvement: +0.09 over baseline (sustained 3 nights)
+  → PR opened, labeled needs-review
+
+Stonks — 980 scenarios tested
+  Best combo: sentiment_threshold=0.7 + "ignore meme stocks"
+  Calmar improvement: +0.04 (2 nights, volatile)
+  → Kept in active list, needs more validation
+```
+
+### 27.9 Implementation
+
+CLI:
+```bash
+python3 -m src.simulator sweep --all              # nightly: all traders, fast screen
+python3 -m src.simulator sweep --trader kairos    # single trader
+python3 -m src.simulator deep --trader kairos     # top candidates, 30-day data
+python3 -m src.simulator weekend                  # 90-day deep sweep, all traders
+python3 -m src.simulator analyze --trader kairos  # generate hypotheses from results
+python3 -m src.simulator promote --trader kairos  # auto-promote if thresholds met
+```
+
+Architecture:
+```
+src/simulator.py          ← main simulation loop + CLI
+src/hypothesis.py         ← pattern analysis + variant generation
+src/prompt_builder.py     ← assemble full prompt from agent files + journal + tick
+src/llm_engine.py         ← OpenRouter API calls, response parsing
+config/sweep.yaml         ← scenario matrix config, cost limits, schedule
+```
+
+---
+
+## §28 — Database Migration System
+
+### 28.1 Why
+
+The trading schema evolves. Parameters get added, tables get columns, indices change.
+Manual `schema.sql` files drift from what's actually running. We need versioned,
+repeatable, automated migrations — like Liquibase but lightweight.
+
+### 28.2 Design
+
+Simple migration system: numbered SQL files, applied in order, tracked in a
+`schema_migrations` table.
+
+```
+src/db/migrations/
+  001_initial_schema.sql      ← what's running now
+  002_add_news_sentiment.sql  ← future: add sentiment column to news
+  003_add_indexes.sql         ← future: perf indexes
+```
+
+Each migration file has an `UP` section (apply) and optional `DOWN` section (rollback).
+A `migrate` CLI command applies any unapplied migrations.
+
+### 28.3 Implementation (backlog — Phase 2)
+
+```
+python3 -m src.db.migrate status    # show applied + pending
+python3 -m src.db.migrate up        # apply pending
+python3 -m src.db.migrate down 1    # rollback last migration
+python3 -m src.db.migrate create    # scaffold new migration file
+```
+
+Migration tracking table:
+```sql
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    applied_at TIMESTAMPTZ DEFAULT NOW(),
+    checksum TEXT
+);
+```
+
+### 28.4 Priority
+
+Not urgent — current schema is stable for Phase 1. Add before Phase 2 (distributed
+workers, multi-machine schema sync). Tracked in GitHub Issues as `backlog/db-migrations`.
+
+---
+
+## §29 — Signal Threshold Tuning & Sweep Optimization
+
+**Status:** Active — implemented based on sweep testing results showing 0 trades
+across all scenarios. The signal engine correctly identifies regimes but produces
+composite signals too weak to trigger trading decisions.
+
+### 29.1 Root Cause
+
+The `momentum_threshold` at 0.55 acts as a divisor in the momentum score
+computation (`scaled = score / threshold`). At 0.55, a 1% price move becomes
+a momentum score of ~0.018, which when blended with RSI and regime components
+produces composite signals peaking around ±0.22 — far below the conviction
+thresholds that trigger BUY/SELL decisions.
+
+### 29.2 Solution: Relaxed Threshold Presets
+
+Instead of a single conservative default, the signal engine now supports
+multiple preset configurations:
+
+```yaml
+# Presets in SignalParams
+conservative:  # Original defaults — production, vetted against 2y data
+  momentum_threshold: 0.55
+  rsi_oversold: 30
+  rsi_overbought: 70
+
+relaxed:       # Sweep starting point — lower bar to get trades flowing
+  momentum_threshold: 0.25    # [0.10, 0.35] sweep range
+  rsi_oversold: 35            # [25, 45]
+  rsi_overbought: 65          # [55, 75]
+  vol_regime_threshold: 0.20  # [0.10, 0.40]
+  base_size_pct: 0.12         # smaller positions = more safety
+
+aggressive:    # Max sensitivity — for finding the edge
+  momentum_threshold: 0.15
+  rsi_oversold: 40
+  rsi_overbought: 60
+  vol_reduction_multiplier: 0.5
+```
+
+### 29.3 Pre-Warm Mechanism
+
+Each `run_scenario` creates a fresh `SignalEngine()`, which needs 20+ ticks
+before indicators (momentum, RSI, volatility) produce meaningful values.
+The first 20 ticks of every scenario are effectively dead air.
+
+**Fix:** Before the scoring loop, feed 30 initial ticks to the signal engine
+to establish a baseline price history. Only start counting trades from tick 31.
+
+```
+for tick in market_data[:30]:   # pre-warm (silent)
+    signal_engine.process(tick)
+
+for tick in market_data[30:]:   # scoring loop
+    ...
+```
+
+### 29.4 Three-Phase Night Pipeline
+
+Replace the current two-phase (backfill → sweep loop) with three phases:
+
+| Phase | What | Duration |
+|-------|------|----------|
+| **1. Backfill** | yfinance → Postgres, all tickers, 30 days | ~5 min |
+| **2. Sweep (relaxed)** | All traders × relaxed thresholds × variants | ~60 min |
+| **3. Auto-relax & re-sweep** | Detect 0-trade runs, lower thresholds, re-run | ~120 min |
+
+**Phase 3 auto-relax logic:**
+
+```
+for each trader:
+    if max_trades_across_all_scenarios == 0:
+        for param in [momentum_threshold, rsi_oversold, rsi_overbought]:
+            relax by 20% of range (toward more permissive)
+        re-run sweep with relaxed params
+    elif max_trades < 3:
+        relax by 10% of range
+        re-run sweep
+    else:
+        record results, move on
+```
+
+Max 3 relaxation iterations per night per trader to avoid runaway.
+
+### 29.5 Learning Loop Feedback Target
+
+`objective_score` penalizes no-trade runs at -1.5. After each sweep iteration,
+the hypothesis engine should:
+
+1. **Lower thresholds** on traders scoring -1.5 (no trades) — the signal bar is too high
+2. **Raise thresholds** on traders with >20 trades and negative PnL — overtrading
+3. **Fine-tune** traders with 3-20 trades and positive PnL — sweet spot
+
+This creates a self-correcting feedback loop: thresholds automatically converge
+to the level where trades actually happen, then optimize for quality.
+
+### 29.6 Implementation
+
+All of the above are implemented in:
+- `src/signals.py` — `SignalParams.relaxed_sweep()` and `aggressive()` factory methods
+- `src/simulator.py` — Pre-warm in `run_scenario`, auto-relax in `run_sweep`
+- `scripts/night_pipeline_v2.py` — Three-phase pipeline with auto-relax loop

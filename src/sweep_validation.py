@@ -31,7 +31,11 @@ AGENTS_DIR = PROJECT_DIR / "agents"
 DB_PATH = PROJECT_DIR / "shared" / "trader.db"
 
 # ── Import from prompt_sweep ─────────────────────────────────────────────────
-from src.prompt_sweep import (  # type: ignore[import]
+_SRC_DIR = str(Path(__file__).resolve().parent)
+if _SRC_DIR not in sys.path:
+    sys.path.insert(0, _SRC_DIR)
+
+from prompt_sweep import (  # type: ignore[import]
     PromptVariant,
     SHORT_NAMES,
     TRADER_IDS,
@@ -47,8 +51,12 @@ from src.prompt_sweep import (  # type: ignore[import]
     run_sweep,
 )
 
-# Metrics from the rebuild
-from src.metrics import compute_calmar, compute_profit_factor  # type: ignore[import]
+# Metrics from the rebuild repo
+_REBUILD_SRC = str(Path(__file__).resolve().parent.parent.parent / "paper-trading-rebuild" / "src")
+if _REBUILD_SRC not in sys.path:
+    sys.path.insert(0, _REBUILD_SRC)
+
+from metrics import compute_calmar, compute_profit_factor  # type: ignore[import]
 
 # ── Default initial cash matches replay_controller.py ─────────────────────────
 DEFAULT_INITIAL_CASH = 10000.0

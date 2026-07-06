@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for src/sweep_validation.py — two-phase signal→LLM validation gate."""
+"""Tests for sweep_validation.py — two-phase signal→LLM validation gate."""
 
 import json
 import sys
@@ -9,6 +9,9 @@ from unittest.mock import MagicMock, patch, PropertyMock, call
 
 import pytest
 import numpy as np
+
+# Ensure project root on path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.sweep_validation import (
     ValidationConfig,
@@ -796,7 +799,7 @@ class TestPromptSweepPhase2Integration:
         mock_config_cls, mock_two_phase,
     ):
         """When --phase2 is True, two_phase_validate() should be called."""
-        from src.prompt_sweep import run_sweep
+        from src.prompt_sweep import run_sweep, PromptVariant, SignalParams
 
         mock_read.return_value = "# Test trader"
         mock_ticks.return_value = _generate_synthetic_ticks("2026-07-05", ["SPY"])

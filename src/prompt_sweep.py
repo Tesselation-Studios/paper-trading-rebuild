@@ -7,11 +7,11 @@ market data using the rebuild's replay harness, ranks by objective score,
 and creates a git branch for the winning variant if it beats baseline.
 
 Usage:
-    python3 -m src.prompt_sweep                              # all traders, yesterday's data
-    python3 -m src.prompt_sweep --trader kairos              # single trader
-    python3 -m src.prompt_sweep --variants 10                # more variants
-    python3 -m src.prompt_sweep --date 2026-07-03            # specific date
-    python3 -m src.prompt_sweep --dry-run                    # score only, no git
+    python3 src/prompt_sweep.py                                # all traders, yesterday's data
+    python3 src/prompt_sweep.py --trader kairos                # single trader
+    python3 src/prompt_sweep.py --variants 10                  # more variants
+    python3 src/prompt_sweep.py --date 2026-07-03              # specific date
+    python3 src/prompt_sweep.py --dry-run                      # score only, no git
 """
 
 from __future__ import annotations
@@ -29,10 +29,14 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
-# ── Direct imports from rebuild modules ──────────────────────────────────────
-from src.metrics import objective_score, compute_calmar, compute_profit_factor
-from src.replay import ReplayHarness, Tick, Portfolio, TraderDecision, ReplayResult
-from src.signals import SignalEngine, SignalParams
+# ── Add rebuild repo to path ─────────────────────────────────────────────────
+_REBUILD_SRC = str(Path(__file__).resolve().parent.parent.parent / "paper-trading-rebuild" / "src")
+if _REBUILD_SRC not in sys.path:
+    sys.path.insert(0, _REBUILD_SRC)
+
+from metrics import objective_score, compute_calmar, compute_profit_factor
+from replay import ReplayHarness, Tick, Portfolio, TraderDecision, ReplayResult
+from signals import SignalEngine, SignalParams
 
 # ── Optional imports for multi-date + cost features ──────────────────────────
 try:
@@ -499,16 +503,19 @@ def load_historical_ticks(
     ticks: List[Tick] = []
 
     # Try to load from market_cache
-    with _get_readonly_conn() as conn:
-        placeholders = ",".join("?" for _ in tickers)
-        rows = conn.execute(
-            f"""SELECT ticker, fetched_at, open, high, low, close, volume, rsi
-                FROM market_cache
-                WHERE ticker IN ({placeholders})
-                  AND date(fetched_at) = ?
-                ORDER BY ticker, fetched_at""",
-            (*tickers, date_str),
-        ).fetchall()
+    try:
+        with _get_readonly_conn() as conn:
+            placeholders = ",".join("?" for _ in tickers)
+            rows = conn.execute(
+                f"""SELECT ticker, fetched_at, open, high, low, close, volume, rsi
+                    FROM market_cache
+                    WHERE ticker IN ({placeholders})
+                      AND date(fetched_at) = ?
+                    ORDER BY ticker, fetched_at""",
+                (*tickers, date_str),
+            ).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
 
     if rows:
         for r in rows:
@@ -532,16 +539,19 @@ def load_historical_ticks(
         return ticks
 
     # Try prices table
-    with _get_readonly_conn() as conn:
-        placeholders = ",".join("?" for _ in tickers)
-        rows = conn.execute(
-            f"""SELECT ticker, fetched_at, open, high, low, close, volume, rsi
-                FROM prices
-                WHERE ticker IN ({placeholders})
-                  AND date(fetched_at) = ?
-                ORDER BY ticker, fetched_at""",
-            (*tickers, date_str),
-        ).fetchall()
+    try:
+        with _get_readonly_conn() as conn:
+            placeholders = ",".join("?" for _ in tickers)
+            rows = conn.execute(
+                f"""SELECT ticker, fetched_at, open, high, low, close, volume, rsi
+                    FROM prices
+                    WHERE ticker IN ({placeholders})
+                      AND date(fetched_at) = ?
+                    ORDER BY ticker, fetched_at""",
+                (*tickers, date_str),
+            ).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
 
     if rows:
         for r in rows:
@@ -753,7 +763,7 @@ def score_variants(
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _run_git(args: List[str]) -> Tuple[int, str, str]:
-    """Run a git command in the rebuild repo."""
+    """Run a git command in the paper-trading-teams repo."""
     cmd = ["git", "-C", str(PROJECT_DIR)] + args
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     return r.returncode, r.stdout.strip(), r.stderr.strip()

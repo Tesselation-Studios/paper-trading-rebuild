@@ -170,6 +170,108 @@ class SignalParams:
                 params.set(name, value)
         return params
 
+    @classmethod
+    def relaxed_sweep(cls) -> "SignalParams":
+        """Relaxed preset — lower thresholds so sweeps actually produce trades.
+
+        This is the recommended starting point for overnight sweep runs.
+        Once trades flow, optimization naturally tightens thresholds toward
+        the sweet spot.
+        """
+        return cls.from_dict({
+            "momentum_threshold": 0.25,
+            "momentum_lookback": 14,
+            "momentum_decay": 0.80,
+            "rsi_oversold": 35.0,
+            "rsi_overbought": 65.0,
+            "bollinger_std": 2.0,
+            "vol_regime_threshold": 0.20,
+            "vol_reduction_multiplier": 0.6,
+            "base_size_pct": 0.12,
+            "conviction_multiplier": 1.5,
+            "max_positions": 5,
+            "stop_loss_pct": 0.05,
+            "take_profit_pct": 0.15,
+            "trailing_stop_pct": 0.03,
+            "weight_trending_up": 1.2,
+            "weight_trending_down": 0.5,
+            "weight_mean_reverting": 1.0,
+            "weight_high_volatility": 0.4,
+        })
+
+    @classmethod
+    def aggressive(cls) -> "SignalParams":
+        """Maximum sensitivity — for discovering the edge of overtrading.
+
+        Only use in deep weekend sweeps. This WILL produce trades; the
+        question is whether they're profitable.
+        """
+        return cls.from_dict({
+            "momentum_threshold": 0.15,
+            "momentum_lookback": 10,
+            "momentum_decay": 0.75,
+            "rsi_oversold": 40.0,
+            "rsi_overbought": 60.0,
+            "bollinger_std": 1.5,
+            "vol_regime_threshold": 0.15,
+            "vol_reduction_multiplier": 0.5,
+            "base_size_pct": 0.10,
+            "conviction_multiplier": 2.0,
+            "max_positions": 5,
+            "stop_loss_pct": 0.04,
+            "take_profit_pct": 0.12,
+            "trailing_stop_pct": 0.02,
+            "weight_trending_up": 1.5,
+            "weight_trending_down": 0.3,
+            "weight_mean_reverting": 1.2,
+            "weight_high_volatility": 0.3,
+        })
+
+    def relax_thresholds(self, factor: float = 0.2) -> "SignalParams":
+        """Return a copy with thresholds relaxed by `factor` of their range.
+
+        A positive factor moves thresholds toward more permissive:
+          - momentum_threshold LOWER (easier to trigger)
+          - rsi_oversold HIGHER (wider oversold band)
+          - rsi_overbought LOWER (wider overbought band)
+          - vol_regime_threshold HIGHER (less likely to trigger vol clamp)
+
+        Args:
+            factor: Fraction of each param's range to shift (0.2 = 20%).
+
+        Returns:
+            New SignalParams with relaxed thresholds.
+        """
+        p = SignalParams(**{
+            f.name: getattr(self, f.name) for f in fields(self)
+            if f.name != "_BOUNDS"
+        })
+        # Relax these specific params toward more permissive
+        relax_lower = ["momentum_threshold", "vol_reduction_multiplier",
+                        "weight_high_volatility", "weight_trending_down"]
+        relax_higher = ["rsi_oversold", "weight_trending_up",
+                         "weight_mean_reverting", "vol_regime_threshold"]
+
+        for name in relax_lower:
+            if name in self.param_names():
+                b = self.bound(name)
+                shift = (b.max_val - b.min_val) * factor
+                p.set(name, self.get(name) - shift)  # lower = more permissive
+
+        for name in relax_higher:
+            if name in self.param_names():
+                b = self.bound(name)
+                shift = (b.max_val - b.min_val) * factor
+                p.set(name, self.get(name) + shift)  # higher = more permissive
+
+        # rsi_overbought: lower = more permissive (we want to detect overbought sooner)
+        b = self.bound("rsi_overbought")
+        shift = (b.max_val - b.min_val) * factor
+        p.set("rsi_overbought", self.get("rsi_overbought") - shift)
+
+        p.clip_all()
+        return p
+
 
 # ── Signal computation ───────────────────────────────────────────────────────
 
