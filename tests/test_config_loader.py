@@ -410,7 +410,7 @@ class TestRealConfigFiles:
         config = get_config(reload=True)
         assert len(config.loaded_files) >= 4
         # Check key values from each
-        assert config.get("risk.position.max_position_pct") == 0.10
+        assert config.get("risk.position.max_position_pct") == 0.25
         assert config.get("data_bus.cache_ttl.quotes") == 5
         assert len(config.get("traders.traders")) == 5
         assert "paper-primary" in config.get("paper.account.id")
@@ -429,8 +429,10 @@ class TestRealConfigFiles:
         assert config.get("data_bus.rate_limits.quotes_per_min") == 200
         assert config.get("data_bus.signals.max_age") == 900
         # Risk defaults
-        assert config.get("risk.position.max_position_pct") == 0.10
+        assert config.get("risk.position.max_position_pct") == 0.25
         assert config.get("risk.drawdown.daily_loss_pct") == 0.03
+        assert config.get("risk.sizing.risk_per_trade_pct") == 0.02
+        assert config.get("risk.gates.require_conviction") == 0.3
         assert config.get("risk.stop_loss.default_pct") == 0.05
         # Paper defaults
         assert config.get("paper.account.initial_balance") == 100000
