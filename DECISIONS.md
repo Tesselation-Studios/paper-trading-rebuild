@@ -178,7 +178,70 @@ Walk-forward validation (`src/validation.py`): train on a rolling window, test o
 
 ---
 
-## 7. Learning Mode: All Traders Start Loose
+## 7. Fixed K=5 Over Auto-Detected K
+
+**Date:** 2026-07-06
+**Status:** Accepted
+
+**Context:**
+When designing the K-means regime detector, we faced the question of how to choose K — the number of clusters (regimes). Standard practice is the elbow method: plot within-cluster sum of squares vs. K, look for a "knee" in the curve. With 60 days of market data (~60-120 observations after featurization), the elbow method produces no meaningful knee — the curve is a smooth downward slope. Elbow method on small samples is statistical theater.
+
+**Decision:**
+Fix K=5. This is an informed guess grounded in how traders and portfolio managers typically describe market regimes: bull, bear, choppy/ranging, high volatility/panic, low volatility/quiet. Five clusters map directly to this mental model. The choice is pragmatic: K=5 is the minimum that covers the "normal" regimes (bull, bear, ranging) plus the edge regimes (panic, quiet).
+
+If the system accumulates enough data over months (200+ trading days), we can revisit with a proper silhouette score analysis. Until then, K=5 is stable, interpretable, and good enough.
+
+**Alternatives considered:**
+- **Elbow method:** Rejected — produces no clear knee at 60 days of data. Theater, not statistics.
+- **Silhouette score today:** Rejected — same data-limitation problem. Would select K=2 (minimum variance) or K=8 (overfitting to noise), neither useful.
+- **Gap statistic:** Rejected — computationally expensive for nightly retraining, same data-limitation problem.
+- **K=4 (match legacy):** Considered but rejected — the whole point of k-means is to capture more regimes than the rule-based classifier's 4 buckets.
+- **K=6 or 7:** Considered — too many regimes for a system running 60 days of data. Sparse clusters would produce unreliable assignments.
+
+**Consequences:**
+- **Pro:** Stable, deterministic clusters every run. No "this Tuesday was cluster 3, last Tuesday was cluster 5" interpretation churn.
+- **Pro:** Maps cleanly to trader mental model (bull/bear/choppy/panic/quiet).
+- **Con:** If markets evolve new regime types, K=5 will force-fit them into existing clusters.
+- **Con:** Mitigated by upgrade path to GMM (soft clustering, variable covariance) when more data accumulates.
+
+**Refs:** `specs/kmeans-regime.md`
+
+---
+
+## 8. Shadow Mode A/B Gate Before Replacing Any Live Classifier
+
+**Date:** 2026-07-06
+**Status:** Accepted
+
+**Context:**
+The rebuild introduces a new regime classifier (K-means with lagged features, K=5) alongside the legacy rule-based classifier (4 buckets, 2 features). Every time a new component replaces a working one, there's risk of regression — the new classifier might produce plausible-looking labels that actually degrade trading performance. Silent regression is the worst failure mode: the system appears fine but performance degrades over weeks.
+
+**Decision:**
+No live classifier replacement without a shadow mode A/B gate. When a new classifier is proposed:
+
+1. **Shadow mode:** Run both classifiers in parallel for 10+ trading days. New classifier produces labels but they're logged only — not consumed by the signal engine.
+2. **Gate evaluation:** Compare P&L under the rule-based classifier vs. what would have happened under K-means labels. If K-means wins on the composite objective function (Calmar + Sortino + PF + Expectancy) for 10 consecutive days, the gate opens.
+3. **Cutover:** Replace the rule-based classifier. Old classifier's labels continue logging alongside new one for 5 more days (rollback window).
+
+This applies to ANY classifier replacement — not just regime detection. Feature importance model, anomaly detector, market state estimator — all go through the same A/B gate.
+
+**Alternatives considered:**
+- **Immediate replacement:** Rejected — too risky. If the classifier regresses, it could take weeks to notice (legacy Stonks pipeline stall went 3+ days unnoticed).
+- **A/B without rollback window:** Rejected — if the new classifier has a rare but catastrophic failure mode, we need the 5-day overlap to detect and revert.
+- **Holdout set validation only:** Rejected — offline validation on historical data can't capture live market dynamics (regime shifts, structural breaks). Shadow mode tests in live conditions.
+
+**Consequences:**
+- **Pro:** No silent regression. Every replacement is validated against a live baseline.
+- **Pro:** The 5-day rollback window means even catastrophic failures are bounded to a few days of degraded performance.
+- **Pro:** Produces a recorded dataset — we can analyze "old classifier vs. new classifier" performance post-hoc.
+- **Con:** Adds operational complexity — two classifiers running in parallel, dual logging, gate evaluation cron.
+- **Con:** Takes 10+ calendar days to promote anything. Slows iteration velocity on classifier improvements.
+
+**Refs:** `specs/kmeans-regime.md`, DECISIONS #2
+
+---
+
+## 9. Learning Mode: All Traders Start Loose
 
 **Date:** 2026-07-06
 **Decision by:** Hermes
@@ -206,7 +269,7 @@ Walk-forward validation (`src/validation.py`): train on a rolling window, test o
 
 ---
 
-## 8. Risk Veto: Decision Quality Gate (Aldridge BAC)
+## 10. Risk Veto: Decision Quality Gate (Aldridge BAC)
 
 **Date:** 2026-07-06
 **Decision by:** Hermes
