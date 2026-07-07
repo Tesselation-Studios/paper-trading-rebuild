@@ -2,7 +2,7 @@
 
 > **Repo:** `Tesselation-Studios/paper-trading-rebuild`
 > **Board:** [GitHub Projects](https://github.com/users/casper-bot-wodinga/projects/2)
-> **Last updated:** 2026-07-07 (overnight — param_history regression fixes `f6927d9`, 773 tests green, all Hermes P0/P1/P2 done)
+> **Last updated:** 2026-07-08 (overnight — param_history fixes `f6927d9`, invariant #8 idempotency `2264188`, 780 tests green)
 > **Active profile:** Raf watching on Canvas — this is the single source of truth for what's being worked on.
 
 ---
@@ -195,6 +195,7 @@ These are Casper-owned items from his backlog that aren't captured in GitHub iss
 - [x] **Fix Postgres migration**: NUL sanitization, `--pull` flag, `SQLITE_PATH` env var ✅ `cc1636c` — 1,972 rows migrated across 9 tables
 - [x] **Build after-hours format test**: `DecisionFormatValidator` + 97 tests ✅ `4d08179` — validates action, ticker, quantity, confidence, thesis, signals_used, exit_condition, holding_horizon per SPEC §4.2
 - [x] **Fix param_history regression**: 7 test failures (convergence threshold, conn.close on None, reason case, mock ordering) ✅ `f6927d9` — 773/773 tests green
+- [x] **Invariant #8 audit**: Idempotent ticks — 7 reproducibility tests ✅ `2264188` — 780/780 tests green
 
 ### Hermes — After P0
 - [x] Fix #52/#44: Unify learning loop format (blocked by Casper data bus)
@@ -246,7 +247,7 @@ Per `SPEC.md` §1.3. Must audit post-migration.
 | 5 | Trader-as-learner | ✅ | Agents do inference in their own ticks |
 | 6 | Ground truth is P&L | ⚠️ | Need to verify realized P&L pipeline |
 | 7 | Out-of-sample validation | ✅ | Walk-forward wired and integrated into nightly pipeline (#19 `3ce9ae0`) |
-| 8 | Idempotent ticks | ⚠️ | Need tests |
+| 8 | Idempotent ticks | ✅ | 7 reproducibility tests (`2264188`) — same harness, separate instances, seeded data, state leakage, field comparison |
 | 9 | Bootstrap fast and small | ✅ | Learning mode active, loose start |
 | 10 | Risk gate mirrors prompts | ⚠️ | #29-style drift — need CI enforcement |
 | 11 | Cron is trigger, not instruction | ✅ | Cron messages fixed per DECISIONS #14 |
