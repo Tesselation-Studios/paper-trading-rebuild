@@ -228,6 +228,7 @@ CREATE TABLE IF NOT EXISTS trading.sweep_results (
     elapsed_s        DECIMAL,                   -- wall-clock seconds
     model_used       VARCHAR(32),               -- which LLM model
     journal_sample   TEXT,                      -- sample journal output
+    validation_meta  JSONB,                     -- two-phase validation metadata
     created_at       TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
     CONSTRAINT uq_sweep_results_run_variant UNIQUE (run_id, variant_id)
 );

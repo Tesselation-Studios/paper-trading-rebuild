@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 import shutil
-import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -25,10 +24,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import psycopg2
+import psycopg2.extras
+
 # ── Project paths ────────────────────────────────────────────────────────────
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 AGENTS_DIR = PROJECT_DIR / "agents"
-DB_PATH = PROJECT_DIR / "shared" / "trader.db"
+DB_DSN = "postgresql://trader:***@192.168.1.179:5433/trading"
 
 # ── Import from prompt_sweep ─────────────────────────────────────────────────
 _SRC_DIR = str(Path(__file__).resolve().parent)
@@ -51,11 +53,7 @@ from prompt_sweep import (  # type: ignore[import]
     run_sweep,
 )
 
-# Metrics from the rebuild repo
-_REBUILD_SRC = str(Path(__file__).resolve().parent.parent.parent / "paper-trading-rebuild" / "src")
-if _REBUILD_SRC not in sys.path:
-    sys.path.insert(0, _REBUILD_SRC)
-
+# Metrics from the rebuild repo (local — we're inside it)
 from metrics import compute_calmar, compute_profit_factor  # type: ignore[import]
 
 # ── Default initial cash matches replay_controller.py ─────────────────────────
@@ -143,56 +141,33 @@ class Phase2Result:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Database: sweep_results table
+# Database: sweep_results table (Postgres)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-_SWEEP_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS sweep_results (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    run_at TEXT NOT NULL,
-    trader TEXT NOT NULL,
-    variant_name TEXT NOT NULL,
-    variant_description TEXT,
-    train_date_range TEXT,
-    val_date_range TEXT,
-    baseline_score REAL,
-    variant_score REAL,
-    variant_llm_score REAL,
-    calmar REAL,
-    profit_factor REAL,
-    win_rate REAL,
-    n_trades INTEGER,
-    cost_adjusted_pnl REAL,
-    promoted BOOLEAN DEFAULT FALSE,
-    branch_name TEXT,
-    signal_params_json TEXT,
-    phase1_winner BOOLEAN DEFAULT FALSE,
-    phase2_winner BOOLEAN DEFAULT FALSE,
-    signal_llm_divergence BOOLEAN DEFAULT FALSE,
-    notes TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_sweep_trader_date ON sweep_results(trader, run_at);
-"""
+
+def _get_pg_conn() -> psycopg2.extensions.connection:
+    """Get a sync Postgres connection to the trading database."""
+    conn = psycopg2.connect(DB_DSN)
+    conn.autocommit = False
+    return conn
 
 
 def _ensure_sweep_table() -> None:
-    """Create sweep_results table if it doesn't exist."""
-    conn = sqlite3.connect(str(DB_PATH), timeout=15)
-    try:
-        conn.executescript(_SWEEP_TABLE_SQL)
-        conn.commit()
-    finally:
-        conn.close()
+    """No-op: sweep_results table is managed by schema.sql migrations."""
+    pass
 
 
 def log_sweep_result(
     result: Dict[str, Any],
     dry_run: bool = False,
 ) -> Optional[int]:
-    """Log a sweep result row to sweep_results table.
+    """Log a two-phase validation result to trading.sweep_results.
+
+    Creates a sweep_run entry if needed, then inserts the result with
+    two-phase metadata stored in the validation_meta JSONB column.
 
     Args:
-        result: Dict with keys matching sweep_results columns.
+        result: Dict with keys matching sweep_results + two-phase columns.
         dry_run: If True, skip DB write.
 
     Returns:
@@ -201,47 +176,94 @@ def log_sweep_result(
     if dry_run:
         return None
 
-    _ensure_sweep_table()
-
-    conn = sqlite3.connect(str(DB_PATH), timeout=15)
+    conn = _get_pg_conn()
     try:
-        conn.execute(
-            """INSERT INTO sweep_results (
-                run_at, trader, variant_name, variant_description,
-                train_date_range, val_date_range,
-                baseline_score, variant_score, variant_llm_score,
-                calmar, profit_factor, win_rate, n_trades,
-                cost_adjusted_pnl, promoted, branch_name,
-                signal_params_json,
-                phase1_winner, phase2_winner, signal_llm_divergence, notes
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        cur = conn.cursor()
+
+        # Ensure a sweep_run exists for this trader+time combination
+        cur.execute(
+            """INSERT INTO trading.sweep_runs
+               (trader_id, n_scenarios, started_at)
+               VALUES (%s, %s, %s)
+               ON CONFLICT DO NOTHING
+               RETURNING id""",
             (
-                result.get("run_at", datetime.now().isoformat()),
                 result.get("trader", ""),
-                result.get("variant_name", ""),
-                result.get("variant_description", ""),
-                result.get("train_date_range", ""),
-                result.get("val_date_range", ""),
-                result.get("baseline_score", 0.0),
-                result.get("variant_score", 0.0),
-                result.get("variant_llm_score", 0.0),
+                result.get("n_trades", 0),
+                result.get("run_at", datetime.now().isoformat()),
+            ),
+        )
+        run_row = cur.fetchone()
+        if run_row:
+            run_id = run_row[0]
+        else:
+            # Get existing run_id
+            cur.execute(
+                """SELECT id FROM trading.sweep_runs
+                   WHERE trader_id = %s
+                   ORDER BY started_at DESC LIMIT 1""",
+                (result.get("trader", ""),),
+            )
+            run_row = cur.fetchone()
+            run_id = run_row[0] if run_row else 1
+
+        # Build validation_meta JSONB with two-phase specific data
+        validation_meta = json.dumps({
+            "variant_name": result.get("variant_name", ""),
+            "variant_description": result.get("variant_description", ""),
+            "train_date_range": result.get("train_date_range", ""),
+            "val_date_range": result.get("val_date_range", ""),
+            "baseline_score": result.get("baseline_score", 0.0),
+            "variant_score": result.get("variant_score", 0.0),
+            "variant_llm_score": result.get("variant_llm_score", 0.0),
+            "cost_adjusted_pnl": result.get("cost_adjusted_pnl", 0.0),
+            "promoted": bool(result.get("promoted", False)),
+            "branch_name": result.get("branch_name", ""),
+            "signal_params_json": result.get("signal_params_json", ""),
+            "phase1_winner": bool(result.get("phase1_winner", False)),
+            "phase2_winner": bool(result.get("phase2_winner", False)),
+            "signal_llm_divergence": bool(result.get("signal_llm_divergence", False)),
+            "notes": result.get("notes", ""),
+        })
+
+        cur.execute(
+            """INSERT INTO trading.sweep_results
+               (run_id, trader_id, variant_id, params_hash,
+                objective_score, calmar, profit_factor, total_pnl,
+                n_trades, win_rate, validation_meta)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+               ON CONFLICT (run_id, variant_id) DO UPDATE SET
+                objective_score = EXCLUDED.objective_score,
+                calmar          = EXCLUDED.calmar,
+                profit_factor   = EXCLUDED.profit_factor,
+                total_pnl       = EXCLUDED.total_pnl,
+                n_trades        = EXCLUDED.n_trades,
+                win_rate        = EXCLUDED.win_rate,
+                validation_meta = EXCLUDED.validation_meta
+               RETURNING id""",
+            (
+                run_id,
+                result.get("trader", ""),
+                abs(hash(result.get("variant_name", ""))) % 100000,  # variant_id as int
+                "",  # params_hash — unused for two-phase
+                result.get("variant_score", 0.0),  # objective_score
                 result.get("calmar", 0.0),
                 result.get("profit_factor", 0.0),
-                result.get("win_rate", 0.0),
+                result.get("cost_adjusted_pnl", 0.0),  # total_pnl
                 result.get("n_trades", 0),
-                result.get("cost_adjusted_pnl", 0.0),
-                int(result.get("promoted", False)),
-                result.get("branch_name", ""),
-                result.get("signal_params_json", ""),
-                int(result.get("phase1_winner", False)),
-                int(result.get("phase2_winner", False)),
-                int(result.get("signal_llm_divergence", False)),
-                result.get("notes", ""),
+                result.get("win_rate", 0.0),
+                validation_meta,
             ),
         )
         conn.commit()
-        row_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        result_row = cur.fetchone()
+        row_id = result_row[0] if result_row else None
+        cur.close()
         return row_id
+    except Exception as e:
+        conn.rollback()
+        print(f"[sweep_validation] DB error logging result: {e}", file=sys.stderr)
+        return None
     finally:
         conn.close()
 
