@@ -22,7 +22,7 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.risk.gates import CashGate, PositionGate, ExposureGate, PDTGate, HoursGate
+from src.risk.gates import CashGate, PositionGate, ExposureGate, PDTGate, HoursGate, ConvictionGate
 from src.risk.manager import RiskManager
 
 
@@ -508,6 +508,71 @@ class TestHoursGate:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# ConvictionGate Tests
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestConvictionGate:
+    """ConvictionGate: minimum conviction for BUY entries. SELL always passes."""
+
+    @pytest.fixture
+    def gate(self):
+        return ConvictionGate(min_conviction=0.3)
+
+    def test_buy_above_conviction_passes(self, gate):
+        """BUY with conviction >= min should pass."""
+        context = {}
+        action = {"type": "BUY", "ticker": "AAPL", "conviction": 0.72}
+        granted, reason = gate.check(context, action)
+        assert granted is True
+        assert ">= 0.3" in reason
+
+    def test_buy_below_conviction_fails(self, gate):
+        """BUY with conviction < min should be rejected."""
+        context = {}
+        action = {"type": "BUY", "ticker": "AAPL", "conviction": 0.15}
+        granted, reason = gate.check(context, action)
+        assert granted is False
+        assert "below minimum" in reason
+
+    def test_sell_always_passes(self, gate):
+        """SELL with low conviction should still pass — entry gate only for BUY."""
+        context = {}
+        action = {"type": "SELL", "ticker": "AAPL", "conviction": 0.05}
+        granted, reason = gate.check(context, action)
+        assert granted is True
+        assert "non-BUY" in reason or "skipped" in reason
+
+    def test_hold_always_passes(self, gate):
+        """HOLD should always pass."""
+        context = {}
+        action = {"type": "HOLD", "ticker": "AAPL"}
+        granted, reason = gate.check(context, action)
+        assert granted is True
+
+    def test_missing_conviction_passes(self, gate):
+        """BUY without conviction key passes through — gate validates quality, not completeness."""
+        context = {}
+        action = {"type": "BUY", "ticker": "AAPL"}
+        granted, reason = gate.check(context, action)
+        assert granted is True
+        assert "no conviction" in reason.lower()
+
+    def test_exact_threshold_passes(self, gate):
+        """BUY with conviction exactly at threshold should pass."""
+        context = {}
+        action = {"type": "BUY", "ticker": "AAPL", "conviction": 0.30}
+        granted, reason = gate.check(context, action)
+        assert granted is True
+
+    def test_custom_threshold(self):
+        """ConvictionGate respects custom min_conviction."""
+        gate = ConvictionGate(min_conviction=0.5)
+        action = {"type": "BUY", "ticker": "AAPL", "conviction": 0.45}
+        granted, reason = gate.check(context={}, action=action)
+        assert granted is False
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # RiskManager Integration Tests
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -520,6 +585,7 @@ class TestRiskManager:
         gates = [
             CashGate(),
             HoursGate(),
+            ConvictionGate(min_conviction=0.3),
             PositionGate(max_position_pct=0.20),
             ExposureGate(max_exposure_pct=1.00),
             PDTGate(pdt_day_trade_limit=3),
@@ -547,7 +613,7 @@ class TestRiskManager:
         )
         assert granted is True
         assert "All gates passed" in reason
-        assert len(results) == 5
+        assert len(results) == 6
         for r in results:
             assert r["passed"] is True, f"Gate {r['gate']} unexpectedly failed: {r['reason']}"
 
@@ -698,10 +764,11 @@ class TestRiskManager:
         try:
             manager = RiskManager()
             gates = manager.gates
-            assert len(gates) == 5
+            assert len(gates) == 6
             gate_names = [type(g).__name__ for g in gates]
             assert "CashGate" in gate_names
             assert "HoursGate" in gate_names
+            assert "ConvictionGate" in gate_names
             assert "PositionGate" in gate_names
             assert "ExposureGate" in gate_names
             assert "PDTGate" in gate_names

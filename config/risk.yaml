@@ -16,7 +16,7 @@ drawdown:
 
 # ── Position Sizing ───────────────────────────────────────────────────────────
 sizing:
-  risk_per_trade_pct: 0.02     # 2% account risk per trade
+  risk_per_trade_pct: 0.03     # 3% account risk per trade (Stonks: aggressive 3% cap)
   min_position_value: 500      # Minimum $500 position
   max_position_value: 5000     # Maximum $5000 position (paper constraint)
 

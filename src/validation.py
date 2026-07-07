@@ -139,3 +139,365 @@ def evaluate_config(
     result = replay_fn(config, data_window)
     # replay_fn returns dict with 'calmar' or 'objective_score'
     return result.get("objective_score", result.get("calmar", result.get("sharpe", 0.0)))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Walk-Forward Validation Integration (SPEC §6.1)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@dataclass
+class ValidationResult:
+    """Result of walk-forward validation for a parameter change.
+
+    Per SPEC §6.1 acceptance criteria:
+      1. Validation Sharpe > 0        (positive on unseen data)
+      2. Validation Sharpe > Baseline Sharpe (improved vs current params)
+      3. Validation Sharpe > Training Sharpe × 0.7 (not grossly overfit)
+
+    If all three pass → accepted = True.
+    """
+
+    accepted: bool
+    train_sharpe: float
+    val_sharpe: float
+    baseline_val_sharpe: float
+    confidence: float  # val_sharpe / train_sharpe — higher = better generalization
+    reason: str  # If rejected, why
+    checks: dict  # Per-criterion pass/fail details
+
+
+@dataclass
+class WalkForwardConfig:
+    """Configuration for walk-forward validation runs."""
+
+    train_window_days: int = 90
+    val_window_days: int = 30
+    min_trades: int = 5  # Minimum trades required for meaningful metrics
+    overfit_threshold: float = 0.30  # Max acceptable degradation
+    step: int = 1  # Day step between windows (1 = dense, 30 = monthly)
+
+
+class WalkForwardValidator:
+    """Walk-forward validation harness — SPEC §6.1.
+
+    Splits historical market data into train/validation windows using
+    strictly temporal order (no shuffling). For each window:
+      1. Train: [T-90 days, T-30 days] — fit parameters
+      2. Validate: [T-30 days, T today] — measure out-of-sample
+
+    Applies three-gate acceptance:
+      - Positive validation Sharpe (not just overfit noise)
+      - Improved over baseline (candidate > current)
+      - No gross overfitting (val ≥ train × 0.7)
+
+    Usage:
+        validator = WalkForwardValidator(harness, config)
+        result = validator.validate(
+            all_ticks=[...],
+            candidate_params={"momentum_threshold": 0.60},
+            baseline_params={"momentum_threshold": 0.55},
+        )
+        if result.accepted:
+            print(f"Accepted with confidence {result.confidence:.2f}")
+    """
+
+    def __init__(
+        self,
+        config: WalkForwardConfig | None = None,
+    ):
+        self.config = config or WalkForwardConfig()
+
+    # ── Public API ──────────────────────────────────────────────────────────
+
+    def validate(
+        self,
+        all_ticks: list,
+        candidate_params: dict,
+        baseline_params: dict,
+        trader_fn=None,
+        initial_balance: float = 100_000.0,
+        cost_model=None,
+    ) -> ValidationResult:
+        """Run walk-forward validation of candidate vs baseline parameters.
+
+        Splits the tick data into training and validation windows according
+        to the configured window sizes. Runs replay on both windows for
+        both parameter sets, computes Sharpe ratios, and applies acceptance
+        criteria from SPEC §6.1.
+
+        Args:
+            all_ticks: Chronological list of market ticks (oldest first).
+            candidate_params: Proposed parameter changes.
+            baseline_params: Current production parameters.
+            trader_fn: Callable (tick, portfolio) → TraderDecision for replay.
+                If None, uses a simple deterministic signal-based trader.
+            initial_balance: Starting cash for replay.
+            cost_model: Optional CostModel for transaction cost adjustment.
+
+        Returns:
+            ValidationResult with accept/reject + diagnostics.
+        """
+        from src.replay import ReplayHarness
+
+        # Build train/val windows
+        windows = list(walk_forward_split(
+            n_days=len(all_ticks),
+            train_window=self.config.train_window_days,
+            val_window=self.config.val_window_days,
+            step=self.config.step,
+        ))
+
+        if not windows:
+            return ValidationResult(
+                accepted=False,
+                train_sharpe=0.0,
+                val_sharpe=0.0,
+                baseline_val_sharpe=0.0,
+                confidence=0.0,
+                reason=f"Not enough data: need {self.config.train_window_days + self.config.val_window_days} "
+                       f"days, got {len(all_ticks)}",
+                checks={},
+            )
+
+        if trader_fn is not None:
+            candidate_fn = trader_fn
+        else:
+            candidate_fn = _default_trader_from_params(candidate_params)
+
+        # Run across all windows and aggregate
+        train_sharpes: list[float] = []
+        val_sharpes: list[float] = []
+        baseline_val_sharpes: list[float] = []
+
+        for window in windows:
+            # Slice data
+            train_ticks = _slice_ticks(all_ticks, window.train_start, window.train_end)
+            val_ticks = _slice_ticks(all_ticks, window.val_start, window.val_end)
+
+            if len(train_ticks) < self.config.min_trades * 2 or len(val_ticks) < self.config.min_trades * 2:
+                continue
+
+            # Candidate: train window
+            harness = ReplayHarness(
+                initial_balance=initial_balance,
+                cost_model=cost_model,
+            )
+            train_result = harness.run(train_ticks, candidate_fn)
+
+            if len(train_result.trades) < self.config.min_trades:
+                continue
+
+            # Candidate: val window
+            harness_val = ReplayHarness(
+                initial_balance=initial_balance,
+                cost_model=cost_model,
+            )
+            val_result = harness_val.run(val_ticks, candidate_fn)
+
+            # Baseline: val window
+            harness_base = ReplayHarness(
+                initial_balance=initial_balance,
+                cost_model=cost_model,
+            )
+            baseline_fn = _default_trader_from_params(baseline_params)
+            baseline_val_result = harness_base.run(val_ticks, baseline_fn)
+
+            # Compute metrics
+            try:
+                import numpy as np
+                from src.metrics import compute_sharpe
+
+                train_sharpe = compute_sharpe(np.array(train_result.returns))
+                val_sharpe = compute_sharpe(np.array(val_result.returns))
+                baseline_val_sharpe = compute_sharpe(np.array(baseline_val_result.returns))
+
+                train_sharpes.append(train_sharpe)
+                val_sharpes.append(val_sharpe)
+                baseline_val_sharpes.append(baseline_val_sharpe)
+            except (ImportError, Exception):
+                pass
+
+        if not val_sharpes:
+            return ValidationResult(
+                accepted=False,
+                train_sharpe=0.0,
+                val_sharpe=0.0,
+                baseline_val_sharpe=0.0,
+                confidence=0.0,
+                reason="No windows produced enough trades for valid metrics",
+                checks={},
+            )
+
+        # Aggregate across windows (mean)
+        avg_train_sharpe = sum(train_sharpes) / len(train_sharpes)
+        avg_val_sharpe = sum(val_sharpes) / len(val_sharpes)
+        avg_baseline_val_sharpe = sum(baseline_val_sharpes) / len(baseline_val_sharpes)
+
+        # Apply acceptance criteria
+        checks = {}
+        failures: list[str] = []
+
+        # Criterion 1: Validation Sharpe > 0
+        checks["val_sharpe_positive"] = avg_val_sharpe > 0
+        if not checks["val_sharpe_positive"]:
+            failures.append(f"Validation Sharpe {avg_val_sharpe:.3f} ≤ 0 (no edge on unseen data)")
+
+        # Criterion 2: Validation Sharpe > Baseline Sharpe
+        checks["beats_baseline"] = avg_val_sharpe > avg_baseline_val_sharpe
+        if not checks["beats_baseline"]:
+            failures.append(
+                f"Validation Sharpe {avg_val_sharpe:.3f} ≤ Baseline {avg_baseline_val_sharpe:.3f}"
+            )
+
+        # Criterion 3: Not grossly overfit
+        is_overfit_result = is_overfit(avg_train_sharpe, avg_val_sharpe, self.config.overfit_threshold)
+        checks["not_overfit"] = not is_overfit_result
+        if is_overfit_result:
+            failures.append(
+                f"Overfit: val Sharpe {avg_val_sharpe:.3f} < train Sharpe "
+                f"{avg_train_sharpe:.3f} × 0.7 = {avg_train_sharpe * 0.7:.3f}"
+            )
+
+        # Statistical significance check
+        is_sig, p_val = is_significant(baseline_val_sharpes, val_sharpes)
+        checks["significant"] = is_sig
+        if not is_sig and len(baseline_val_sharpes) >= 5:
+            failures.append(f"Improvement not statistically significant (p={p_val:.3f} ≥ 0.05)")
+
+        confidence = avg_val_sharpe / avg_train_sharpe if avg_train_sharpe > 0 else 0.0
+        accepted = len(failures) == 0
+
+        return ValidationResult(
+            accepted=accepted,
+            train_sharpe=avg_train_sharpe,
+            val_sharpe=avg_val_sharpe,
+            baseline_val_sharpe=avg_baseline_val_sharpe,
+            confidence=min(confidence, 1.0),
+            reason="; ".join(failures) if failures else "All acceptance criteria met",
+            checks=checks,
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Helpers
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _slice_ticks(ticks: list, start_idx: int, end_idx: int) -> list:
+    """Slice a list of ticks by index range, clamping to available data."""
+    end = min(end_idx, len(ticks))
+    if start_idx >= end:
+        return []
+    return ticks[start_idx:end]
+
+
+def _default_trader_from_params(params: dict):
+    """Build a simple deterministic trader callable from signal parameters.
+
+    This trader uses momentum threshold + RSI from params to make
+    BUY/SELL decisions. Designed for walk-forward validation — no
+    LLM calls, fast enough for many windows.
+
+    Args:
+        params: Dict of signal parameters (momentum_threshold, rsi_oversold,
+            rsi_overbought, stop_loss_pct, take_profit_pct).
+
+    Returns:
+        Callable (tick, portfolio) → TraderDecision.
+    """
+    from src.replay import Tick, Portfolio, TraderDecision  # noqa: F811
+
+    momentum_threshold = params.get("momentum_threshold", 0.55)
+    rsi_oversold = params.get("rsi_oversold", 30.0)
+    rsi_overbought = params.get("rsi_overbought", 70.0)
+    stop_loss_pct = params.get("stop_loss_pct", 0.05)
+
+    def trader(tick, portfolio):
+        # Check stop-loss exits
+        for pos in list(portfolio.positions.values()):
+            if pos.current_price > 0 and pos.entry_price > 0:
+                pnl_pct = (pos.current_price - pos.entry_price) / pos.entry_price
+                if pnl_pct <= -stop_loss_pct:
+                    return TraderDecision(
+                        ticker=pos.ticker,
+                        decision="SELL",
+                        conviction=1.0,
+                        rationale=f"Stop-loss triggered: {pnl_pct:.1%}",
+                    )
+
+        # Simple momentum-based entry
+        # In practice, these would come from the signal engine
+        momentum = params.get("_momentum_override", tick.momentum if hasattr(tick, "momentum") else 0.5)
+        rsi = params.get("_rsi_override", tick.rsi if hasattr(tick, "rsi") else 50.0)
+
+        if momentum > momentum_threshold and rsi < rsi_overbought:
+            return TraderDecision(
+                ticker=tick.ticker,
+                decision="BUY",
+                conviction=min(momentum, 0.95),
+                rationale=f"Momentum {momentum:.2f} > {momentum_threshold}, RSI {rsi:.0f}",
+            )
+
+        if rsi > rsi_overbought:
+            return TraderDecision(
+                ticker=tick.ticker,
+                decision="SELL",
+                conviction=0.8,
+                rationale=f"RSI {rsi:.0f} > {rsi_overbought} (overbought)",
+            )
+
+        return TraderDecision(
+            ticker=tick.ticker,
+            decision="HOLD",
+            conviction=0.0,
+            rationale="No signal",
+        )
+
+    return trader
+
+
+def walk_forward_validate(
+    ticks: list,
+    candidate_params: dict,
+    baseline_params: dict | None = None,
+    train_days: int = 90,
+    val_days: int = 30,
+    initial_balance: float = 100_000.0,
+    cost_model=None,
+) -> ValidationResult:
+    """Convenience function: walk-forward validate a parameter change.
+
+    This is the main entry point for nightly pipeline integration.
+    Call it with a list of ticks + candidate parameter set, and it
+    returns a structured ValidationResult.
+
+    Args:
+        ticks: Chronological market ticks (oldest first).
+        candidate_params: Proposed parameter dict.
+        baseline_params: Current production params (defaults to candidate
+            with no changes if None — for initial bootstrap validation).
+        train_days: Training window in days (default 90 per SPEC §6.1).
+        val_days: Validation window in days (default 30 per SPEC §6.1).
+        initial_balance: Starting cash for replay.
+        cost_model: Optional CostModel.
+
+    Returns:
+        ValidationResult with accept/reject + diagnostics.
+    """
+    if baseline_params is None:
+        baseline_params = dict(candidate_params)  # Bootstrap: compare against self
+
+    config = WalkForwardConfig(
+        train_window_days=train_days,
+        val_window_days=val_days,
+    )
+
+    validator = WalkForwardValidator(config=config)
+    return validator.validate(
+        all_ticks=ticks,
+        candidate_params=candidate_params,
+        baseline_params=baseline_params,
+        initial_balance=initial_balance,
+        cost_model=cost_model,
+    )

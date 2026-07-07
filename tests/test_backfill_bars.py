@@ -19,7 +19,10 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 if "pandas_ta" in sys.modules and isinstance(sys.modules["pandas_ta"], MagicMock):
     del sys.modules["pandas_ta"]
 
-import backfill_bars as bb
+try:
+    import backfill_bars as bb
+except ImportError as exc:
+    pytest.skip(f"backfill_bars requires pandas_ta (not installed): {exc}", allow_module_level=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

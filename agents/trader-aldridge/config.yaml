@@ -1,0 +1,45 @@
+name: Edmund Whitfield
+firm: Aldridge & Partners
+strategy: value
+
+model:
+  primary: openrouter/deepseek/deepseek-v4-flash
+  fallback: openrouter/deepseek/deepseek-v4-pro
+  fallback_requirement: "portfolio > $11,000 OR 3+ consecutive positive P&L days"
+
+risk:
+  max_position_pct: 0.10
+  max_exposure_pct: 1.00
+  stop_loss_pct: 0.03
+  max_daily_loss: 300
+  min_cash_deployment_pct: 0.60
+  max_cash_deployment_pct: 0.80
+  war_chest_position_pct: 0.20
+  war_chest_enable_at_portfolio: 10500
+
+signals:
+  fundamentals_weight: 0.50
+  value_weight: 0.25
+  momentum_weight: 0.15
+  sentiment_weight: 0.10
+  minimum_confidence: 0.70
+  confirmations_required: 3
+
+thesis:
+  min_margin_of_safety_pct: 0.10
+  max_position_without_moat_score: 0.05
+  quarterly_review: true
+  contrarian_check_required: true
+  macro_sensitivity_required: true
+
+exit_rules:
+  sell_on_thesis_break: true
+  sell_on_valuation_extreme: true
+  sell_on_fundamental_deterioration: true
+  max_hold_days: null
+  profit_target_pct: null
+
+limit_orders:
+  enabled: true
+  patience_days: 3
+  max_tick_deviation: 0.02

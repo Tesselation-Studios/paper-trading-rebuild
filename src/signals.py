@@ -316,6 +316,10 @@ class SignalReport:
     composite_signal: float       # -1.0 to 1.0, weighted summary
     conviction: float             # 0.0 - 1.0, how strongly the engine believes in the signal
 
+    # Volume
+    volume_ratio: Optional[float] = None   # current_volume / 20d avg volume
+    volume_pass: bool = True               # True if volume filter passes (or bypassed)
+
 
 class SignalEngine:
     """Computes structured signal reports from Tick data.
@@ -332,12 +336,15 @@ class SignalEngine:
         self.params = params or SignalParams()
         self.max_history = max_history
         self._price_history: Dict[str, List[float]] = {}  # ticker → [closes...]
+        self._volume_history: Dict[str, List[int]] = {}    # ticker → [volumes...]
 
-    def process(self, tick: Any) -> SignalReport:
+    def process(self, tick: Any, fear_greed: Optional[float] = None) -> SignalReport:
         """Process a tick and return a signal report.
 
         Args:
             tick: A Tick-like object with .ticker, .close, .timestamp, etc.
+            fear_greed: Optional Fear & Greed index (0-100). Enables CHOPPY+ExtremeFear
+                        volume bypass when ≤ 30 and regime is MEAN_REVERTING.
 
         Returns:
             SignalReport with all computed signals.
@@ -352,7 +359,16 @@ class SignalEngine:
         if len(self._price_history[ticker]) > self.max_history:
             self._price_history[ticker].pop(0)
 
+        # Update volume history
+        vol = getattr(tick, 'volume', 0)
+        if ticker not in self._volume_history:
+            self._volume_history[ticker] = []
+        self._volume_history[ticker].append(vol)
+        if len(self._volume_history[ticker]) > self.max_history:
+            self._volume_history[ticker].pop(0)
+
         prices = self._price_history[ticker]
+        volumes = self._volume_history[ticker]
         p = self.params
 
         # ── Momentum ──────────────────────────────────────────────────
@@ -383,6 +399,21 @@ class SignalEngine:
         # Base size, scaled by regime weight and conviction
         recommended_size = p.base_size_pct * regime_weight
         recommended_size = min(recommended_size, p.base_size_pct * p.conviction_multiplier)
+
+        # ── Volume filter ──────────────────────────────────────────────
+        volume_ratio = self._compute_volume_ratio(volumes)
+        volume_pass = volume_ratio >= p.volume_threshold if volume_ratio is not None else True
+
+        # CHOPPY + Extreme Fear bypass: per Kairos prompt rules, CHOPPY regime
+        # (mapped to MEAN_REVERTING) with Fear & Greed ≤ 30 indicates market
+        # capitulation — this is opportunity, not threat. Relax volume filter
+        # so traders can buy oversold quality stocks.
+        if (
+            regime == "MEAN_REVERTING"
+            and fear_greed is not None
+            and fear_greed <= 30.0
+        ):
+            volume_pass = True  # Bypass volume filter in CHOPPY + Extreme Fear
 
         # ── Risk ──────────────────────────────────────────────────────
         stop_loss = price * (1 - p.stop_loss_pct)
@@ -426,6 +457,8 @@ class SignalEngine:
             take_profit=round(take_profit, 2),
             composite_signal=round(composite, 4),
             conviction=round(conviction, 4),
+            volume_ratio=round(volume_ratio, 4) if volume_ratio is not None else None,
+            volume_pass=volume_pass,
         )
 
     # ── Indicator computations ──────────────────────────────────────────────
@@ -476,6 +509,20 @@ class SignalEngine:
 
         rs = avg_gain / avg_loss
         return float(100.0 - (100.0 / (1.0 + rs)))
+
+    @staticmethod
+    def _compute_volume_ratio(volumes: List[int], lookback: int = 20) -> Optional[float]:
+        """Compute current volume relative to 20-day average volume.
+
+        Returns:
+            Volume ratio (current / avg), or None if insufficient data.
+        """
+        if len(volumes) < lookback + 1:
+            return None
+        avg_volume = float(np.mean(volumes[-(lookback + 1):-1]))
+        if avg_volume <= 0:
+            return None
+        return float(volumes[-1] / avg_volume)
 
     @staticmethod
     def _compute_volatility(prices: List[float]) -> float:
@@ -581,6 +628,8 @@ def gradient_step(
     learning_rate: float = 0.01,
     max_change_pct: float = 0.05,
     param_names: Optional[List[str]] = None,
+    trader_id: str = "",
+    record_history: bool = True,
 ) -> Tuple[SignalParams, Dict[str, float]]:
     """Run one gradient descent step across all parameters.
 
@@ -590,6 +639,8 @@ def gradient_step(
         learning_rate: Step size (default 0.01).
         max_change_pct: Max parameter change as fraction of its range.
         param_names: Which params to optimize (default: all).
+        trader_id: Trader identifier for history tracking.
+        record_history: If True, records changes to param_history table (#23).
 
     Returns:
         (updated_params, gradients_dict)
@@ -613,7 +664,27 @@ def gradient_step(
         step = learning_rate * grad
         step = float(np.clip(step, -max_step, max_step))
 
-        new_val = b.clip(params.get(name) + step)
+        old_val = params.get(name)
+        new_val = b.clip(old_val + step)
         params.set(name, new_val)
+
+        # Record parameter change history (#23)
+        if record_history and abs(new_val - old_val) > 1e-10:
+            try:
+                from src.param_history import record_gradient_step
+                record_gradient_step(
+                    param_name=name,
+                    old_value=old_val,
+                    new_value=new_val,
+                    before_score=baseline,
+                    trader_id=trader_id,
+                    learning_rate=learning_rate,
+                    gradient=grad,
+                )
+            except Exception as e:
+                log.warning(
+                    "Failed to record param history for %s: %s — continuing",
+                    name, e,
+                )
 
     return params, gradients

@@ -123,11 +123,15 @@ class ReplayResult:
     trades: List[Trade]
     initial_balance: float
     final_equity: float
-    total_pnl: float
+    total_pnl: float          # net P&L when cost model is active, gross otherwise
     total_return_pct: float
     n_ticks: int
     n_decisions: int  # how many non-HOLD decisions were made
     tickers_seen: List[str]
+
+    # Cost-adjusted fields (populated when cost_model is active)
+    gross_pnl: float = 0.0     # P&L before transaction costs
+    total_cost: float = 0.0    # total transaction cost deducted
 
     @property
     def positive_trades(self) -> List[Trade]:
@@ -142,10 +146,23 @@ class ReplayResult:
         return [t.pnl for t in self.trades]
 
     @property
+    def net_trade_pnls(self) -> List[float]:
+        """Trade PnLs net of transaction costs (falls back to gross if no costs)."""
+        return [getattr(t, "pnl_net", t.pnl) for t in self.trades]
+
+    @property
     def win_rate(self) -> float:
         if not self.trades:
             return 0.0
         return len(self.positive_trades) / len(self.trades)
+
+    @property
+    def net_win_rate(self) -> float:
+        """Win rate computed on net (cost-adjusted) PnL."""
+        if not self.trades:
+            return 0.0
+        net_wins = [t for t in self.trades if getattr(t, "pnl_net", t.pnl) > 0]
+        return len(net_wins) / len(self.trades)
 
 
 # ── Trader function type ─────────────────────────────────────────────────────
@@ -168,6 +185,9 @@ class ReplayHarness:
         commission_per_share: Per-share commission (default 0.0 for paper).
         max_position_pct: Max fraction of equity per position (default 20%).
         require_conviction: Minimum conviction to execute a trade (default 0.0).
+        cost_model: Optional CostModel for transaction cost adjustment.
+            When set, ReplayResult.total_pnl reflects net P&L (gross - costs)
+            and each Trade gets a pnl_net attribute.
     """
 
     def __init__(
@@ -176,11 +196,13 @@ class ReplayHarness:
         commission_per_share: float = 0.0,
         max_position_pct: float = 0.20,
         require_conviction: float = 0.0,
+        cost_model: Any = None,
     ):
         self.initial_balance = initial_balance
         self.commission_per_share = commission_per_share
         self.max_position_pct = max_position_pct
         self.require_conviction = require_conviction
+        self.cost_model = cost_model
 
         # Reset per run
         self._portfolio: Portfolio = Portfolio(cash=initial_balance)
@@ -367,6 +389,30 @@ class ReplayHarness:
 
         # Close any remaining open positions at last price to compute final P&L
         unrealized_pnl = sum(p.unrealized_pnl for p in self._portfolio.positions.values())
+        gross_pnl = final_equity - self.initial_balance + unrealized_pnl
+
+        total_cost = 0.0
+        net_pnl = gross_pnl
+
+        # Apply transaction cost model if configured
+        if self.cost_model is not None:
+            # Build a temporary result for the cost model
+            temp = ReplayResult(
+                equity_curve=np.array(self._equity, dtype=np.float64),
+                returns=np.array([], dtype=np.float64),
+                trades=list(self._trades),
+                initial_balance=self.initial_balance,
+                final_equity=final_equity,
+                total_pnl=gross_pnl,
+                total_return_pct=(final_equity - self.initial_balance) / self.initial_balance * 100,
+                n_ticks=n_ticks,
+                n_decisions=self._decision_count,
+                tickers_seen=list(dict.fromkeys(self._tickers_seen)),
+            )
+            total_cost = self.cost_model.apply_to_result(temp)
+            net_pnl = gross_pnl - total_cost
+            # copy the updated trades back (they now have pnl_net)
+            self._trades = list(temp.trades)
 
         return ReplayResult(
             equity_curve=np.array(self._equity, dtype=np.float64),
@@ -374,11 +420,13 @@ class ReplayHarness:
             trades=list(self._trades),
             initial_balance=self.initial_balance,
             final_equity=final_equity,
-            total_pnl=final_equity - self.initial_balance + unrealized_pnl,
+            total_pnl=net_pnl,
             total_return_pct=(final_equity - self.initial_balance) / self.initial_balance * 100,
             n_ticks=n_ticks,
             n_decisions=self._decision_count,
-            tickers_seen=list(dict.fromkeys(self._tickers_seen)),  # deduped, order preserved
+            tickers_seen=list(dict.fromkeys(self._tickers_seen)),
+            gross_pnl=gross_pnl,
+            total_cost=total_cost,
         )
 
 

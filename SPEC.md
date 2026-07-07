@@ -1614,15 +1614,19 @@ Lessons from the first bootstrap attempt where zero trades executed across 10+ d
 
 ### 30.1 Prompt Deployment Path
 
-The traders run inside OpenClaw workspaces. They read:
-- `AGENTS.md` — operational workflow + output format
-- `skills/persona-strategy/SKILL.md` — strategic identity
+The traders run inside OpenClaw workspaces. They have two execution modes:
 
-The `prompts/*.txt` files in `paper-trading-prompts` are the **source of truth**, but they must be deployed TO the workspace files. The deployment path is:
+| Mode | Trigger | What it does | Reads |
+|------|---------|-------------|-------|
+| **Trading cron** | OpenClaw agent cron (every 5-15 min during market) | Makes BUY/SELL/HOLD decision | AGENTS.md (output format) + SKILL.md (strategy) + cron inline prompt |
+| **HEARTBEAT** | Separate cron (less frequent) | Reviews trades, tunes params, commits, reflection | HEARTBEAT.md (review/improve instructions) |
 
+**HEARTBEAT.md is NOT for trading decisions.** It handles post-trade reflection and parameter tuning. Confusing the two leads to agents that think their job is maintenance instead of trading.
+
+The prompt deployment path is:
 ```
-paper-trading-prompts/kairos/prompt.txt
-    → openclaw@.41:~/.openclaw/workspace-trader-kairos/AGENTS.md (output format section)
+paper-trading-prompts/kairos/prompt.txt  (source of truth)
+    → openclaw@.41:~/.openclaw/workspace-trader-kairos/AGENTS.md (output format + workflow)
     → openclaw@.41:~/.openclaw/workspace-trader-kairos/skills/persona-strategy/SKILL.md (strategy)
 ```
 
@@ -1661,3 +1665,16 @@ During bootstrap (first 30 closed trades or +5% equity, whichever comes first):
 - **holding_horizon_days**: Default to 5 if missing during bootstrap. After bootstrap: VETO.
 
 This prevents the death spiral where: traders are too conservative → don't trade → when they finally try, risk veto rejects → still no trades → still no data → traders stay conservative. The bootstrap gate breaks this cycle by letting noisy trades through. Format correctness is valuable but secondary to having data to optimize against.
+
+### 30.5 After-Hours Format Validation
+
+Before every market open, each trader's prompt + HEARTBEAT must be tested through the actual model to verify it can produce valid JSON with all required fields.
+
+**Test:** Send the full prompt + HEARTBEAT + simulated market context through the model. Validate the output:
+- Parses as valid JSON
+- Contains all required BUY fields: thesis (20+ chars), signals_used (array ≥ 1), exit_condition, holding_horizon_days, stop_loss, confidence
+- OR produces a valid HOLD/SELL
+
+**Schedule:** 8:00 AM ET, Mon-Fri. If any trader fails, block market open — fix the prompt first. A day with broken prompts is a day with zero data.
+
+**Script:** `validate_prompt_format.py` in Hermes cron scripts. Model used: the same model each trader runs (kairos: flash, aldridge: pro, stonks: flash).

@@ -431,7 +431,7 @@ class TestRealConfigFiles:
         # Risk defaults
         assert config.get("risk.position.max_position_pct") == 0.25
         assert config.get("risk.drawdown.daily_loss_pct") == 0.03
-        assert config.get("risk.sizing.risk_per_trade_pct") == 0.02
+        assert config.get("risk.sizing.risk_per_trade_pct") == 0.03
         assert config.get("risk.gates.require_conviction") == 0.3
         assert config.get("risk.stop_loss.default_pct") == 0.05
         # Paper defaults

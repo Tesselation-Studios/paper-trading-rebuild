@@ -288,6 +288,55 @@ class PDTGate:
         )
 
 
+class ConvictionGate:
+    """Validate BUY entries against minimum conviction threshold.
+
+    SELL and HOLD actions are always allowed — this gate only validates
+    entry quality. Per SPEC §3 and risk gate invariants, exiting a position
+    must not be blocked by entry-quality checks.
+
+    This is the upstream fix for the signal_scores gate that was blocking
+    sell orders on the OpenClaw side. BUY-only gate, composable into the
+    RiskManager chain.
+
+    Config keys:
+        min_conviction: float (default 0.3)
+    """
+
+    def __init__(self, min_conviction: float = 0.3):
+        self.min_conviction = min_conviction
+
+    def check(
+        self,
+        context: Dict[str, Any],
+        action: Dict[str, Any],
+        timestamp: Optional[datetime] = None,
+    ) -> Tuple[bool, str]:
+        """Only gate BUY. SELL and HOLD always pass."""
+        action_type = str(action.get("type", action.get("action", ""))).upper()
+        if action_type != "BUY":
+            return True, f"ConvictionGate: non-BUY ({action_type}), skipped"
+
+        # If conviction not in action, pass through — this gate validates
+        # conviction quality, not data pipeline completeness
+        if "conviction" not in action:
+            return True, "ConvictionGate: no conviction data, passed"
+
+        conviction = float(action.get("conviction", 0) or 0)
+        ticker = str(action.get("ticker", "")).upper()
+
+        if conviction < self.min_conviction:
+            return False, (
+                f"ConvictionGate: BUY {ticker} conviction {conviction:.2f} "
+                f"below minimum {self.min_conviction}"
+            )
+
+        return True, (
+            f"ConvictionGate: BUY {ticker} conviction {conviction:.2f} "
+            f">= {self.min_conviction}"
+        )
+
+
 class HoursGate:
     """Only allow trading during regular market hours: 09:30–16:00 Eastern Time,
     Monday through Friday.

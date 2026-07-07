@@ -528,3 +528,348 @@ def test_replay_to_objective_score():
     # (unless max drawdown > 15%, which it shouldn't in a clean uptrend)
     assert isinstance(score, float)
     assert score > 0.0
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Stop-loss assertion tests (#42)
+# Every BUY trade must write stop_loss. Default = entry_price * 0.95 (5% stop).
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestStopLossComputation:
+    """Verify stop_loss computation used by sync_trades.py."""
+
+    def test_stop_loss_default_5pct(self):
+        """Stop-loss = entry_price * (1 - 0.05), rounded to 2 decimals."""
+        from src.sync_trades import _compute_stop_loss, DEFAULT_STOP_LOSS_PCT
+
+        assert DEFAULT_STOP_LOSS_PCT == 0.05
+
+        # Round numbers
+        assert _compute_stop_loss(100.0) == 95.0
+        assert _compute_stop_loss(200.0) == 190.0
+        assert _compute_stop_loss(50.0) == 47.5
+
+        # Precise numbers from real trades
+        assert _compute_stop_loss(198.795143) == 188.86  # ADBE
+        assert _compute_stop_loss(112.08) == 106.48       # HOOD
+        assert _compute_stop_loss(370.836667) == 352.29   # MSFT
+
+    def test_stop_loss_always_below_entry(self):
+        """Stop-loss must be strictly below entry price (positive stop_loss_pct)."""
+        from src.sync_trades import _compute_stop_loss
+
+        for entry in [10.0, 50.0, 100.0, 250.0, 500.0]:
+            stop = _compute_stop_loss(entry)
+            assert stop < entry, f"stop_loss={stop} >= entry={entry}"
+            # Should be roughly 5% below
+            assert abs((entry - stop) / entry - 0.05) < 0.001
+
+    def test_stop_loss_never_negative(self):
+        """Stop-loss should never go below zero even for tiny entry prices."""
+        from src.sync_trades import _compute_stop_loss
+
+        assert _compute_stop_loss(1.0) == 0.95
+        assert _compute_stop_loss(0.05) == 0.05  # rounds to nearest 0.01
+        assert _compute_stop_loss(0.001) == 0.0  # rounds down
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Transaction Cost Integration Tests (#20)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestTransactionCostIntegration:
+    """Verify CostModel wires into ReplayHarness correctly."""
+
+    def test_no_cost_model_produces_gross_pnl(self):
+        """Without cost model, total_pnl = gross, total_cost = 0."""
+        from src.replay import ReplayHarness, make_deterministic_uptrend_ticks
+
+        ticks = make_deterministic_uptrend_ticks(n=10, start_price=100.0)
+        harness = ReplayHarness(initial_balance=100_000.0)
+
+        result = harness.run(ticks, buy_hold_trader)
+
+        assert result.total_cost == 0.0
+        assert result.gross_pnl == result.total_pnl
+        assert result.total_pnl >= 0  # uptrend should be profitable
+
+    def test_cost_model_produces_net_pnl(self):
+        """With cost model on round-trip trades, pnl_net exists and total_cost > 0."""
+        from src.replay import ReplayHarness, make_deterministic_uptrend_ticks
+        from src.transaction_costs import CostModel
+        from src.replay import TraderDecision
+
+        ticks = make_deterministic_uptrend_ticks(n=10, start_price=100.0)
+        cost_model = CostModel(slippage_bps=10.0, spread_bps=5.0,
+                               commission_per_share=0.0, min_trade_cost=0.0)
+        harness = ReplayHarness(initial_balance=100_000.0, cost_model=cost_model)
+
+        # Trader that buys first tick, sells last tick (round-trip)
+        buy_done = False
+
+        def round_trip_trader(tick, portfolio):
+            nonlocal buy_done
+            ticker = tick.ticker
+            if not buy_done:
+                buy_done = True
+                return TraderDecision(ticker=ticker, decision="BUY", conviction=1.0,
+                                      rationale="Buy first tick")
+            # On the last tick, sell everything
+            if ticker in portfolio.positions:
+                return TraderDecision(ticker=ticker, decision="SELL", conviction=1.0,
+                                      rationale="Sell last tick")
+            return TraderDecision(ticker=ticker, decision="HOLD", conviction=0.0)
+
+        result = harness.run(ticks, round_trip_trader)
+
+        # Should have completed trades
+        assert len(result.trades) > 0
+        for trade in result.trades:
+            assert hasattr(trade, "pnl_net")
+            assert trade.pnl_net <= trade.pnl  # costs reduce P&L
+
+        assert result.total_cost > 0
+        assert result.gross_pnl >= result.total_pnl
+        assert result.total_pnl == pytest.approx(result.gross_pnl - result.total_cost)
+
+    def test_cost_model_does_not_affect_zero_trade_run(self):
+        """With cost model but no trades, nothing breaks."""
+        from src.replay import ReplayHarness, Tick
+        from src.transaction_costs import CostModel
+
+        ticks = [Tick(
+            timestamp=__import__("datetime").datetime(2024, 1, 2, 10, 0),
+            ticker="AAPL", open=100, high=101, low=99, close=100, volume=1000,
+        )]
+        cost_model = CostModel.default()
+        harness = ReplayHarness(initial_balance=100_000.0, cost_model=cost_model)
+
+        # HOLD-only trader
+        def hold_trader(tick, portfolio):
+            from src.replay import TraderDecision
+            return TraderDecision(ticker=tick.ticker, decision="HOLD", conviction=0.0)
+
+        result = harness.run(ticks, hold_trader)
+        assert result.total_cost == 0.0
+        assert result.gross_pnl == 0.0
+        assert len(result.trades) == 0
+
+    def test_cost_model_adjusts_total_pnl(self):
+        """total_pnl reflects net when cost model is active."""
+        from src.replay import ReplayHarness, make_uptrend_ticks
+        from src.transaction_costs import CostModel
+
+        ticks = make_uptrend_ticks(n=30, start_price=100.0, seed=42)
+        cost_model = CostModel(slippage_bps=100.0, spread_bps=0.0,
+                               commission_per_share=0.0, min_trade_cost=0.0)
+
+        # Run WITH costs
+        h1 = ReplayHarness(initial_balance=100_000.0, cost_model=cost_model)
+        r1 = h1.run(ticks, buy_hold_trader)
+
+        # Run WITHOUT costs
+        h2 = ReplayHarness(initial_balance=100_000.0)
+        r2 = h2.run(ticks, buy_hold_trader)
+
+        # With costs: net P&L should be lower
+        if len(r1.trades) > 0:
+            assert r1.total_pnl < r2.total_pnl, \
+                f"Net P&L {r1.total_pnl:.2f} should be lower than gross {r2.total_pnl:.2f}"
+            assert r1.total_cost > 0
+
+    def test_net_trade_pnls_property(self):
+        """ReplayResult.net_trade_pnls returns cost-adjusted values."""
+        from src.replay import ReplayHarness, make_deterministic_uptrend_ticks
+        from src.transaction_costs import CostModel
+
+        ticks = make_deterministic_uptrend_ticks(n=10, start_price=100.0)
+        cost_model = CostModel(slippage_bps=10.0, spread_bps=5.0,
+                               commission_per_share=0.0, min_trade_cost=0.0)
+        harness = ReplayHarness(initial_balance=100_000.0, cost_model=cost_model)
+
+        result = harness.run(ticks, buy_hold_trader)
+
+        net_pnls = result.net_trade_pnls
+        gross_pnls = result.trade_pnls
+
+        assert len(net_pnls) == len(gross_pnls)
+        for net, gross in zip(net_pnls, gross_pnls):
+            assert net <= gross  # costs always reduce
+
+    def test_net_win_rate(self):
+        """net_win_rate may be lower than win_rate due to costs."""
+        from src.replay import ReplayHarness, make_deterministic_uptrend_ticks
+        from src.transaction_costs import CostModel
+
+        ticks = make_deterministic_uptrend_ticks(n=10, start_price=100.0)
+        cost_model = CostModel(slippage_bps=10.0, spread_bps=5.0,
+                               commission_per_share=0.0, min_trade_cost=0.0)
+        harness = ReplayHarness(initial_balance=100_000.0, cost_model=cost_model)
+
+        result = harness.run(ticks, buy_hold_trader)
+
+        assert hasattr(result, "net_win_rate")
+        assert isinstance(result.net_win_rate, float)
+        # net_win_rate ≤ win_rate (costs can flip marginal winners)
+        assert result.net_win_rate <= result.win_rate
+
+    def test_alpaca_paper_cost_model_integration(self):
+        """Alpaca paper cost model works end-to-end."""
+        from src.replay import ReplayHarness, make_deterministic_uptrend_ticks
+        from src.transaction_costs import CostModel
+
+        ticks = make_deterministic_uptrend_ticks(n=10, start_price=100.0)
+        harness = ReplayHarness(
+            initial_balance=100_000.0,
+            cost_model=CostModel.alpaca_paper(),
+        )
+
+        result = harness.run(ticks, buy_hold_trader)
+        assert result.total_cost >= 0
+        for trade in result.trades:
+            assert hasattr(trade, "pnl_net")
+
+    def test_backward_compatible_no_cost_model(self):
+        """ReplayHarness without cost_model still works (backward compat)."""
+        from src.replay import ReplayHarness, make_uptrend_ticks
+
+        ticks = make_uptrend_ticks(n=20, start_price=100.0, seed=99)
+        harness = ReplayHarness(initial_balance=100_000.0)
+
+        result = harness.run(ticks, buy_hold_trader)
+
+        # Old API still works
+        assert isinstance(result.equity_curve, __import__("numpy").ndarray)
+        assert isinstance(result.trades, list)
+        assert result.n_ticks == 20
+        assert result.total_cost == 0.0
+        assert result.gross_pnl == result.total_pnl  # equal when no costs
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Idempotency tests — Invariant #8
+# "Running the same tick twice produces the same result."
+# No side effects that depend on timing, no shared state leakage.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestIdempotency:
+    """Invariant #8: Idempotent ticks — same input → same output every time."""
+
+    def test_same_harness_twice_produces_identical_results(self):
+        """Re-running the same harness with same data → identical result."""
+        ticks = make_deterministic_uptrend_ticks(n=50, start_price=100.0, step_pct=0.005)
+        harness = ReplayHarness(initial_balance=100_000)
+
+        result1 = harness.run(ticks, buy_hold_trader)
+        result2 = harness.run(ticks, buy_hold_trader)
+
+        assert result1.final_equity == result2.final_equity
+        assert result1.total_pnl == result2.total_pnl
+        assert result1.total_return_pct == result2.total_return_pct
+        assert result1.n_ticks == result2.n_ticks
+        assert result1.n_decisions == result2.n_decisions
+        assert len(result1.trades) == len(result2.trades)
+        assert np.array_equal(result1.equity_curve, result2.equity_curve)
+        for t1, t2 in zip(result1.trades, result2.trades):
+            assert t1.ticker == t2.ticker
+            assert t1.entry_price == t2.entry_price
+            assert t1.exit_price == t2.exit_price
+            assert t1.shares == t2.shares
+            assert t1.pnl == t2.pnl
+
+    def test_two_instances_same_result(self):
+        """Two separate harness instances with same inputs → identical."""
+        ticks = make_deterministic_uptrend_ticks(n=50, start_price=100.0, step_pct=0.005)
+
+        h1 = ReplayHarness(initial_balance=100_000)
+        h2 = ReplayHarness(initial_balance=100_000)
+
+        r1 = h1.run(ticks, buy_hold_trader)
+        r2 = h2.run(ticks, buy_hold_trader)
+
+        assert r1.final_equity == r2.final_equity
+        assert r1.total_pnl == r2.total_pnl
+        assert np.array_equal(r1.equity_curve, r2.equity_curve)
+        assert len(r1.trades) == len(r2.trades)
+
+    def test_seeded_random_walk_reproducible(self):
+        """Uptrend ticks with same seed produce reproducible results."""
+        ticks1 = make_uptrend_ticks(n=30, start_price=100.0, seed=42)
+        ticks2 = make_uptrend_ticks(n=30, start_price=100.0, seed=42)
+
+        h1 = ReplayHarness(initial_balance=100_000)
+        h2 = ReplayHarness(initial_balance=100_000)
+
+        r1 = h1.run(ticks1, buy_hold_trader)
+        r2 = h2.run(ticks2, buy_hold_trader)
+
+        assert r1.final_equity == r2.final_equity
+        assert r1.total_pnl == r2.total_pnl
+        assert np.array_equal(r1.equity_curve, r2.equity_curve)
+
+    def test_trend_following_deterministic(self):
+        """Trend-following trader on deterministic data → reproducible."""
+        ticks = make_deterministic_uptrend_ticks(n=40, start_price=100.0, step_pct=0.005)
+
+        h1 = ReplayHarness(initial_balance=100_000, require_conviction=0.0)
+        h2 = ReplayHarness(initial_balance=100_000, require_conviction=0.0)
+
+        r1 = h1.run(ticks, trend_following_trader)
+        r2 = h2.run(ticks, trend_following_trader)
+
+        assert r1.final_equity == r2.final_equity
+        assert r1.total_pnl == r2.total_pnl
+        assert r1.n_decisions == r2.n_decisions
+        assert np.array_equal(r1.equity_curve, r2.equity_curve)
+
+    def test_never_buy_trader_deterministic(self):
+        """No-trade runs are always identical."""
+        ticks = make_deterministic_uptrend_ticks(n=30, start_price=100.0)
+
+        h1 = ReplayHarness(initial_balance=100_000)
+        h2 = ReplayHarness(initial_balance=100_000)
+
+        r1 = h1.run(ticks, never_buy_trader)
+        r2 = h2.run(ticks, never_buy_trader)
+
+        assert r1.final_equity == r2.final_equity
+        assert r1.final_equity == 100_000
+        assert len(r1.trades) == 0
+        assert len(r2.trades) == 0
+
+    def test_no_shared_mutation_between_runs(self):
+        """First run does not affect second run's results (no state leakage)."""
+        ticks = make_deterministic_uptrend_ticks(n=50, start_price=100.0)
+
+        harness = ReplayHarness(initial_balance=100_000)
+        r1 = harness.run(ticks, buy_hold_trader)
+
+        # Mutate a trade from r1 — should not affect r2
+        if r1.trades:
+            r1.trades[0].pnl = 999999.99
+
+        r2 = harness.run(ticks, buy_hold_trader)
+
+        assert r2.final_equity == r1.final_equity
+        assert np.array_equal(r2.equity_curve, r1.equity_curve)
+        assert len(r2.trades) == len(r1.trades)
+
+    def test_replay_result_fields_match_deterministic(self):
+        """All ReplayResult fields are deterministic."""
+        ticks = make_deterministic_uptrend_ticks(n=30, start_price=100.0, step_pct=0.005)
+
+        r1 = ReplayHarness(initial_balance=100_000).run(ticks, buy_hold_trader)
+        r2 = ReplayHarness(initial_balance=100_000).run(ticks, buy_hold_trader)
+
+        assert r1.initial_balance == r2.initial_balance
+        assert r1.final_equity == r2.final_equity
+        assert r1.total_pnl == r2.total_pnl
+        assert r1.total_return_pct == r2.total_return_pct
+        assert r1.n_ticks == r2.n_ticks
+        assert r1.n_decisions == r2.n_decisions
+        assert r1.tickers_seen == r2.tickers_seen
+        assert r1.win_rate == r2.win_rate
+        assert np.array_equal(r1.returns, r2.returns)

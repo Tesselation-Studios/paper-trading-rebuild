@@ -1,0 +1,59 @@
+name: Stan Hoolihan
+firm: Stonks Capital
+strategy: community-momentum
+
+model:
+  primary: openrouter/deepseek/deepseek-v4-flash
+  fallback: openrouter/deepseek/deepseek-v4-pro
+  fallback_requirement: "portfolio > $11,000 OR 3+ consecutive positive P&L days"
+
+risk:
+  max_position_pct: 0.04
+  max_exposure_pct: 1.00
+  stop_loss_pct: 0.05
+  max_daily_loss: 300
+  crypto_max_position_pct: 0.03
+  crypto_max_exposure_pct: 0.08
+  crypto_exit_btc_pct: -0.05
+  crypto_exit_eth_pct: -0.07
+
+signals:
+  community_weight: 0.35
+  momentum_weight: 0.30
+  sentiment_weight: 0.20
+  volume_weight: 0.10
+  flow_weight: 0.05
+  minimum_confidence: 0.65
+  confirmations_required: 3
+
+entry_gate:
+  rsi_min: 50
+  rsi_max: 70
+  macd_bullish_required: true
+  price_above_ma20_required: true
+  min_volume_ratio: 2.0
+  weighted_conviction_min: 0.50
+  fear_greed_extreme_threshold: 25
+  fear_greed_extreme_confirmations: 5
+  fear_greed_extreme_conviction: 0.70
+  high_conviction_override_conviction: 0.80
+  high_conviction_override_catalyst: 0.70
+  high_conviction_override_min_signals: 2
+
+signal_weights:
+  wsb: 0.30
+  sentiment: 0.25
+  volume: 0.20
+  flow: 0.15
+  catalyst: 0.10
+
+exit_rules:
+  profit_target_pct: 0.25
+  flash_profit_target_pct: 0.10
+  max_hold_days: 14
+
+options:
+  enabled: false
+  enable_at_portfolio: 12500
+  dd_required: insane
+  risk_capped: true

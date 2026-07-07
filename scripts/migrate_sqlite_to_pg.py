@@ -9,10 +9,14 @@ Usage:
     python3 scripts/migrate_sqlite_to_pg.py --dry-run
     python3 scripts/migrate_sqlite_to_pg.py
     python3 scripts/migrate_sqlite_to_pg.py --table trades
+    python3 scripts/migrate_sqlite_to_pg.py --pull     # auto-copy from OpenClaw
+    SQLITE_PATH=/tmp/trader.db python3 scripts/migrate_sqlite_to_pg.py
 """
 
 import argparse
+import os
 import sqlite3
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -22,7 +26,12 @@ import psycopg2
 from psycopg2.extras import execute_values
 
 # ── Config ────────────────────────────────────────────────────────────────────
-SQLITE_PATH = "/home/openclaw/projects/paper-trading-teams/shared/trader.db"
+SQLITE_PATH = os.environ.get(
+    "SQLITE_PATH",
+    "/home/openclaw/projects/paper-trading-teams/shared/trader.db",
+)
+OPENCLAW_HOST = "192.168.1.41"
+OPENCLAW_USER = "openclaw"
 PG_HOST = "192.168.1.179"
 PG_PORT = 5433
 PG_DB = "trading"
@@ -52,8 +61,9 @@ MIGRATION_TABLES: list[dict[str, Any]] = [
             "status": "status",
             "decision_id": "decision_id",
             "entry_reason": "entry_reason",
+            "stop_loss": "stop_loss",
         },
-        "on_conflict": "(agent_id, ticker, entry_time) DO NOTHING",
+        "on_conflict": "DO NOTHING",
     },
     {
         "sqlite": "decisions",
@@ -118,7 +128,7 @@ MIGRATION_TABLES: list[dict[str, Any]] = [
             "unrealized_pl": "unrealized_pl",
             "opened_at": "opened_at",
         },
-        "on_conflict": "(agent_id, ticker) DO UPDATE SET quantity=EXCLUDED.quantity, current_price=EXCLUDED.current_price, market_value=EXCLUDED.market_value, unrealized_pl=EXCLUDED.unrealized_pl",
+        "on_conflict": "DO NOTHING",
     },
     {
         "sqlite": "portfolio_snapshots",
@@ -180,11 +190,19 @@ MIGRATION_TABLES: list[dict[str, Any]] = [
             "ticker": "ticker",
             "score": "overall_sentiment",
             "articles_count": "mention_count",
+            "source": "sources",
             "fetched_at": "fetched_at",
         },
         "on_conflict": "DO NOTHING",
     },
 ]
+
+
+def _sanitize_value(val: Any) -> Any:
+    """Strip NUL bytes from string values (Postgres rejects them)."""
+    if isinstance(val, str):
+        return val.replace("\x00", "")
+    return val
 
 
 def migrate_table(
@@ -229,10 +247,10 @@ def migrate_table(
         print(f"  [SKIP] {sq_table} → no matching columns")
         return 0
 
-    # Extract values
+    # Extract values (sanitize NULL bytes)
     values = []
     for row in sq_rows:
-        values.append(tuple(row[i] for i in sq_indices))
+        values.append(tuple(_sanitize_value(row[i]) for i in sq_indices))
 
     col_str = ", ".join(pg_cols)
 
@@ -243,8 +261,13 @@ def migrate_table(
     # Insert into Postgres
     pg_cur = pg_conn.cursor()
     sql = f"INSERT INTO {pg_table} ({col_str}) VALUES %s ON CONFLICT {on_conflict}"
-    execute_values(pg_cur, sql, values)
-    pg_conn.commit()
+    try:
+        execute_values(pg_cur, sql, values)
+        pg_conn.commit()
+    except Exception as e:
+        pg_conn.rollback()
+        print(f"  [ERROR] {sq_table} → {pg_table}: {e}")
+        return 0
 
     print(f"  [OK] {sq_table} → {pg_table}: {len(values)} rows")
     return len(values)
@@ -256,14 +279,41 @@ def main():
     )
     parser.add_argument("--dry-run", action="store_true", help="Preview only")
     parser.add_argument("--table", type=str, help="Migrate a single table")
+    parser.add_argument(
+        "--pull",
+        action="store_true",
+        help="Auto-copy SQLite DB from OpenClaw before migrating",
+    )
     args = parser.parse_args()
 
-    if not Path(SQLITE_PATH).exists():
-        print(f"ERROR: SQLite DB not found at {SQLITE_PATH}")
-        print("Run from OpenClaw or update SQLITE_PATH")
+    # --pull: copy SQLite from OpenClaw to a local temp file
+    if args.pull:
+        if not Path(SQLITE_PATH).exists() or args.pull:
+            local_path = "/tmp/trader.db"
+            print(f"Pulling SQLite from {OPENCLAW_USER}@{OPENCLAW_HOST}...")
+            cmd = [
+                "ssh", f"{OPENCLAW_USER}@{OPENCLAW_HOST}",
+                f"cat /home/openclaw/projects/paper-trading-teams/shared/trader.db",
+            ]
+            try:
+                result = subprocess.run(cmd, capture_output=True, timeout=30)
+                if result.returncode != 0:
+                    print(f"ERROR: SSH failed: {result.stderr.decode()}")
+                    sys.exit(1)
+                Path(local_path).write_bytes(result.stdout)
+                print(f"  → {len(result.stdout)} bytes written to {local_path}")
+                os.environ["SQLITE_PATH"] = local_path
+            except subprocess.TimeoutExpired:
+                print("ERROR: SSH timed out")
+                sys.exit(1)
+
+    sqlite_path = os.environ.get("SQLITE_PATH", SQLITE_PATH)
+    if not Path(sqlite_path).exists():
+        print(f"ERROR: SQLite DB not found at {sqlite_path}")
+        print("Run with --pull to auto-copy from OpenClaw, or set SQLITE_PATH env var")
         sys.exit(1)
 
-    sq_conn = sqlite3.connect(SQLITE_PATH)
+    sq_conn = sqlite3.connect(sqlite_path)
     sq_conn.row_factory = sqlite3.Row
 
     pg_conn = psycopg2.connect(

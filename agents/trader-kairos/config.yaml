@@ -1,0 +1,49 @@
+name: Zara Chen
+firm: Kairos Capital
+strategy: momentum
+
+model:
+  primary: openrouter/deepseek/deepseek-v4-flash
+  fallback: openrouter/deepseek/deepseek-v4-pro
+  fallback_requirement: "portfolio > $11,000 OR 3+ consecutive positive P&L days"
+
+risk:
+  max_position_pct: 0.08
+  max_exposure_pct: 1.00
+  stop_loss_pct: 0.05
+  max_daily_loss: 300
+  cash_reserve: 2000
+  min_shares_per_position: 3
+  max_share_price_target: 200
+
+signals:
+  momentum_weight: 0.40
+  sentiment_weight: 0.30
+  regime_weight: 0.30
+  minimum_confidence: 0.65
+  confirmations_required: 3
+
+hmm_regime:
+  sustainable:
+    entry: full
+    confidence_threshold: 0.75
+    half_size_threshold: 0.50
+  choppy:
+    entry: half
+    confirmations_required: 3
+    max_position_pct: 0.03
+  exhausted:
+    entry: blocked
+  fallback: "use technicals — do not halt"
+
+options:
+  enabled: false
+  enable_at_portfolio: 11000
+  max_exposure_pct: 0.10
+  max_stop_loss_pct: 0.25
+
+exit_rules:
+  profit_target_pct: 0.15
+  flash_profit_target_pct: 0.10
+  max_hold_days: 7
+  stale_days: 5

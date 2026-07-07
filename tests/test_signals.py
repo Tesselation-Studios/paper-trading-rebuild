@@ -259,6 +259,60 @@ class TestSignalEngine:
         assert aapl.momentum_signal == "BULLISH"
         assert goog.momentum_signal == "BEARISH"
 
+    def test_volume_ratio_computed_when_data_available(self):
+        """Volume ratio is computed when tick has volume data."""
+        engine = SignalEngine()
+        # Feed 22 ticks with increasing volume
+        for i in range(22):
+            tick = DummyTick("AAPL", 100 + i, f"day-{i}")
+            tick.volume = 1_000_000 + i * 100_000
+            engine.process(tick)
+        # Process with high volume
+        tick = DummyTick("AAPL", 122.0, "day-end")
+        tick.volume = 3_000_000  # 3x the average
+        report = engine.process(tick)
+        assert report.volume_ratio is not None
+        assert report.volume_ratio > 1.0
+
+    def test_volume_pass_defaults_true_without_volume(self):
+        """volume_pass is True when tick has no volume attr (DummyTick)."""
+        engine = SignalEngine()
+        report = engine.process(DummyTick("AAPL", 100.0))
+        assert report.volume_pass is True
+        assert report.volume_ratio is None
+
+    def test_volume_bypass_chop_extreme_fear(self):
+        """volume_pass is True when MEAN_REVERTING + fear_greed ≤ 30, even with low volume."""
+        engine = SignalEngine()
+        # Feed flat prices + very low volume to create MEAN_REVERTING regime
+        for i in range(22):
+            tick = DummyTick("AAPL", 100 + 0.1 * i, f"day-{i}")
+            tick.volume = 100_000  # consistently low
+            engine.process(tick)
+        # Last tick: low volume, CHOPPY regime, Extreme Fear
+        tick = DummyTick("AAPL", 102.0, "chop-day")
+        tick.volume = 50_000  # very low volume
+        report = engine.process(tick, fear_greed=24.0)
+        assert report.volume_pass is True  # bypassed due to CHOPPY + Extreme Fear
+        assert report.volume_ratio is not None
+        assert report.volume_ratio < 1.0  # volume is low, but pass is True
+
+    def test_volume_not_bypassed_normal_fear_greed(self):
+        """volume_pass follows actual volume when fear_greed > 30."""
+        engine = SignalEngine()
+        # Feed flat prices
+        for i in range(22):
+            tick = DummyTick("AAPL", 100 + 0.1 * i, f"day-{i}")
+            tick.volume = 10_000_000  # high avg volume
+            engine.process(tick)
+        # Last tick: very low volume, fear_greed = 45 (not extreme)
+        tick = DummyTick("AAPL", 102.0, "day")
+        tick.volume = 1_000_000  # 0.1x avg volume
+        report = engine.process(tick, fear_greed=45.0)
+        assert report.volume_pass is False  # NOT bypassed, fails volume threshold
+        assert report.volume_ratio is not None
+        assert report.volume_ratio < 1.2  # below default 1.2 threshold
+
 
 # ── Gradient descent tests ───────────────────────────────────────────────────
 
@@ -308,6 +362,7 @@ class TestGradientDescent:
 
         new_params, gradients = gradient_step(
             params, scorer, learning_rate=0.1, param_names=["momentum_threshold"],
+            record_history=False,
         )
 
         # Params should have moved
@@ -325,6 +380,7 @@ class TestGradientDescent:
         new_params, _ = gradient_step(
             params, scorer, learning_rate=1.0,  # aggressive
             param_names=["rsi_oversold"],
+            record_history=False,
         )
         # Should be clipped to max (40)
         assert new_params.get("rsi_oversold") <= 40.0
@@ -341,6 +397,7 @@ class TestGradientDescent:
             params, scorer, learning_rate=100.0,  # absurdly aggressive
             max_change_pct=0.05,
             param_names=["momentum_threshold"],
+            record_history=False,
         )
         change = abs(new_params.get("momentum_threshold") - 0.55)
         assert change <= 0.03 + 0.001  # max step + epsilon tolerance
@@ -351,7 +408,7 @@ class TestGradientDescent:
         def bad_scorer(p: SignalParams) -> float:
             raise RuntimeError("always fails")
 
-        new_params, gradients = gradient_step(params, bad_scorer)
+        new_params, gradients = gradient_step(params, bad_scorer, record_history=False)
         # Should return unchanged params, empty gradients
         assert gradients == {}
         assert new_params.get("momentum_threshold") == 0.55

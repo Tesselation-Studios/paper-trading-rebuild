@@ -18,6 +18,7 @@ from src.risk.gates import (
     ExposureGate,
     PDTGate,
     HoursGate,
+    ConvictionGate,
 )
 
 
@@ -66,6 +67,7 @@ class RiskManager:
         return [
             CashGate(),
             HoursGate(),
+            ConvictionGate(min_conviction=float(spec_risk.get("require_conviction", 0.3))),
             PositionGate(max_position_pct=max_position_pct),
             ExposureGate(max_exposure_pct=max_exposure_pct),
             PDTGate(pdt_day_trade_limit=pdt_day_trade_limit),
