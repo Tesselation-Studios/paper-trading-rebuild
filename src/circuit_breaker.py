@@ -396,6 +396,37 @@ def get_breaker(trader_id: str) -> AgentCircuitBreaker:
     return AgentCircuitBreaker.get(trader_id)
 
 
+def guard_tick(trader_id: str, ticker: str = "") -> dict:
+    """Pre-tick guard: check if trader is paused before processing.
+
+    Call this before dispatching a tick to a trader. Returns a dict with:
+        - allowed: bool — whether the tick can proceed
+        - reason: str — why it was blocked (empty if allowed)
+        - status: dict — current breaker status
+
+    Usage in tick_prompt.py or cron wrapper:
+        guard = guard_tick("trader-kairos")
+        if not guard["allowed"]:
+            print(json.dumps({"skipped": True, ...}))
+            return
+    """
+    breaker = AgentCircuitBreaker.get(trader_id)
+    paused, reason = breaker.check_paused()
+    status = breaker.status()
+
+    if paused:
+        log.info(
+            "[%s] Tick BLOCKED: trader paused (reason=%s, trip_count=%d)",
+            trader_id, reason, status["total_trips"],
+        )
+        return {
+            "allowed": False,
+            "reason": reason or "Circuit breaker tripped",
+            "status": status,
+        }
+    return {"allowed": True, "reason": "", "status": status}
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 

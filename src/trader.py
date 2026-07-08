@@ -27,6 +27,7 @@ from src.signals import SignalEngine, SignalParams, SignalReport
 from src.metrics import objective_score
 from src.risk.manager import RiskManager
 from src.risk.stop_loss import StopLossManager
+from src.circuit_breaker import AgentCircuitBreaker, get_breaker
 
 log = logging.getLogger("trader")
 
@@ -134,6 +135,9 @@ class Trader:
         self.governor = ChangeGovernor(trader_id)
         self.max_journal_entries = max_journal_entries
 
+        # Agent tool-loop circuit breaker — prevents runaway tool calls
+        self.agent_breaker = get_breaker(trader_id)
+
         # Build sector lookup from fundamentals DB (if available)
         sector_lookup = self._build_sector_lookup()
         self.risk_manager = RiskManager(sector_lookup=sector_lookup)
@@ -232,6 +236,28 @@ class Trader:
         ticker = tick.ticker
         price = tick.close
 
+        # 0. Agent circuit breaker guard — skip if paused
+        if self.agent_breaker.is_paused():
+            _, reason = self.agent_breaker.check_paused()
+            # Build a minimal signal report for journaling
+            from datetime import datetime as dt
+            ts = getattr(tick, "timestamp", dt.now())
+            zero_signal = SignalReport(
+                ticker=ticker, timestamp=ts,
+                momentum_score=0.0, momentum_signal="neutral",
+                rsi=50.0, rsi_signal="neutral",
+                volatility=0.0, volatility_regime="unknown",
+                regime="PAUSED", regime_confidence=0.0, regime_weight=0.0,
+                recommended_size_pct=0.0, max_positions=0,
+                stop_loss=0.0, take_profit=0.0,
+                composite_signal=0.0, conviction=0.0,
+            )
+            self._journal(tick, zero_signal, "SKIPPED",
+                          f"Circuit breaker paused: {reason}")
+            log.warning("[%s] Tick SKIPPED — circuit breaker paused: %s",
+                        self.trader_id, reason)
+            return None
+
         self.state.ticks_processed += 1
 
         # 1. Signal engine: compute indicators
@@ -239,6 +265,7 @@ class Trader:
         self.breaker.update(self.state.equity)
         if not self.breaker.state.can_trade:
             self._journal(tick, signal, "BLOCKED", f"Breaker: {self.breaker.state.level.value}")
+            self.agent_breaker.mark_decision()  # drawdown breaker is a valid stop
             return None
 
         # 2. STOP-LOSS CHECK — enforce before any new trade decisions
@@ -278,6 +305,7 @@ class Trader:
 
         if decision is None or decision.decision == "HOLD":
             self._journal(tick, signal, "HOLD", "No signal or conviction too low")
+            self.agent_breaker.mark_decision()  # HOLD is a valid decision
             return None
 
         # 5. Apply position sizing
@@ -298,6 +326,7 @@ class Trader:
             if not granted:
                 log.warning("[%s] Risk gate blocked %s: %s", self.trader_id, ticker, reason)
                 self._journal(tick, signal, "BLOCKED", reason)
+                self.agent_breaker.mark_decision()  # blocked is a valid outcome
                 return None
 
         # 6. Execute (simulated in paper; real would call Alpaca)
@@ -313,6 +342,8 @@ class Trader:
                 self.state.mode = TraderMode.LIVE
                 log.info("[%s] Exiting warmup — going LIVE", self.trader_id)
 
+        # 9. Mark decision made — prevents timeout gate from tripping
+        self.agent_breaker.mark_decision()
         return decision
 
     def _default_decider(
@@ -353,6 +384,18 @@ class Trader:
     def set_decider(self, fn: Callable) -> None:
         """Replace the decision function (e.g., with LLM agent or Q-learning)."""
         self._decider = fn
+
+    def track_tool_call(self, tool_name: str, args: Optional[Dict[str, Any]] = None) -> Tuple[bool, Optional[str]]:
+        """Track one tool call through the agent circuit breaker.
+
+        Call this from the OpenClaw agent side when making tool calls
+        (web_search, get_quotes, etc.) during tick processing.
+
+        Returns:
+            (True, None) if the call is allowed.
+            (False, reason) if the circuit breaker tripped.
+        """
+        return self.agent_breaker.track(tool_name, args)
 
     # ── Execution ────────────────────────────────────────────────────────────
 

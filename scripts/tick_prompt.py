@@ -61,6 +61,9 @@ def fetch_quotes_live(symbols: list[str]) -> dict:
     except Exception as e:
         print(f"WARNING: live quotes fetch failed: {e}", file=sys.stderr)
         return {}
+    
+
+def fetch_technical_scan(symbol: str) -> dict:
     """Get multi-timeframe technical scan for one symbol."""
     url = f"{DATA_BUS_URL}/technical_scan?symbol={symbol}"
     try:
@@ -79,6 +82,9 @@ def fetch_fear_greed() -> dict:
             return data.get("fear_greed", data)
     except Exception:
         return {}
+
+
+def fetch_sentiment(symbol: str) -> dict:
     """Get FinBERT sentiment for one symbol."""
     url = f"{DATA_BUS_URL}/sentiment?symbol={symbol}"
     try:
@@ -215,8 +221,46 @@ def build_signals_board(snapshot: dict) -> str:
     return "\n".join(lines) if lines else "No signals from other traders this tick."
 
 
+def check_circuit_breaker(trader_id: str) -> dict | None:
+    """Check if the trader's circuit breaker is tripped.
+
+    Returns None if trading is allowed, or a dict with skip info if paused.
+    Resilient: if the circuit breaker module or DB is unavailable, logs a warning
+    and allows the tick through (fail-open).
+    """
+    agent_id = f"trader-{trader_id}"
+    try:
+        from src.circuit_breaker import get_breaker
+        breaker = get_breaker(agent_id)
+        paused, reason = breaker.check_paused()
+        if paused:
+            status = breaker.status()
+            return {
+                "agent": agent_id,
+                "paused": True,
+                "reason": reason or "Circuit breaker tripped",
+                "total_trips": status.get("total_trips", 0),
+                "last_trip_at": status.get("last_trip_at"),
+            }
+        return None
+    except Exception as e:
+        print(f"WARNING: circuit breaker check failed (fail-open): {e}", file=sys.stderr)
+        return None
+
+
 def assemble_prompt(trader_id: str, db_path: str | None = None) -> str:
     """Assemble the complete trading prompt for one tick."""
+    # 0. Circuit breaker guard — skip if paused
+    skip_info = check_circuit_breaker(trader_id)
+    if skip_info:
+        return json.dumps({
+            "tick_skipped": True,
+            "agent": skip_info["agent"],
+            "reason": skip_info["reason"],
+            "total_trips": skip_info["total_trips"],
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S ET"),
+        })
+
     # 1. Read the prompt template
     prompt_path = PROMPTS_DIR / f"{trader_id}.txt"
     if not prompt_path.exists():
@@ -319,6 +363,20 @@ def main():
         print(f"WARNING: DB not found at {args.db_path}, journal unavailable", file=sys.stderr)
 
     prompt = assemble_prompt(args.trader, db_path)
+
+    # Check if tick was skipped by circuit breaker
+    try:
+        parsed = json.loads(prompt)
+        if isinstance(parsed, dict) and parsed.get("tick_skipped"):
+            # Tick skipped — output skip info and exit clean
+            if args.json:
+                print(json.dumps(parsed))
+            else:
+                print(f"SKIPPED: {parsed['agent']} is paused — {parsed['reason']}")
+                print(f"         Trips: {parsed['total_trips']}, Last: {parsed.get('last_trip_at', 'N/A')}")
+            sys.exit(0)
+    except (json.JSONDecodeError, TypeError):
+        pass  # Not JSON — normal prompt text
 
     if args.json:
         print(json.dumps({"prompt": prompt}))
