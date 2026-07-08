@@ -14,8 +14,9 @@ Gates:
 RiskManager chains gates in order and evaluates trades.
 """
 
-from src.risk.gates import CashGate, PositionGate, ExposureGate, PDTGate, HoursGate
+from src.risk.gates import CashGate, PositionGate, ExposureGate, PDTGate, HoursGate, ConvictionGate, SectorGate
 from src.risk.manager import RiskManager
+from src.circuit_breaker import AgentCircuitBreaker, get_breaker
 
 __all__ = [
     "CashGate",
@@ -23,5 +24,9 @@ __all__ = [
     "ExposureGate",
     "PDTGate",
     "HoursGate",
+    "ConvictionGate",
+    "SectorGate",
     "RiskManager",
+    "AgentCircuitBreaker",
+    "get_breaker",
 ]

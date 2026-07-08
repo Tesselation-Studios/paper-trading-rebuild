@@ -650,6 +650,72 @@ async def get_equity_history(
 
 
 # ---------------------------------------------------------------------------
+# trading.risk_state — circuit breaker pause management
+# ---------------------------------------------------------------------------
+
+
+async def upsert_risk_state(
+    agent_id: str,
+    is_paused: bool = False,
+    paused_reason: Optional[str] = None,
+    paused_at: Optional[datetime] = None,
+) -> None:
+    """Upsert risk_state row for circuit breaker pause management.
+
+    Args:
+        agent_id: Trader agent ID (e.g. trader-kairos).
+        is_paused: Whether the trader is paused.
+        paused_reason: Human-readable reason for the pause.
+        paused_at: When the pause started (None to clear).
+    """
+    await execute(
+        """
+        INSERT INTO trading.risk_state (agent_id, is_paused, paused_reason, paused_at, updated_at)
+        VALUES ($1, $2, $3, $4, NOW())
+        ON CONFLICT (agent_id) DO UPDATE SET
+            is_paused     = EXCLUDED.is_paused,
+            paused_reason = EXCLUDED.paused_reason,
+            paused_at     = EXCLUDED.paused_at,
+            updated_at    = NOW()
+        """,
+        agent_id, is_paused, paused_reason, paused_at,
+    )
+
+
+async def get_risk_state(agent_id: str) -> Optional[asyncpg.Record]:
+    """Get risk_state row for an agent."""
+    return await fetchrow(
+        "SELECT * FROM trading.risk_state WHERE agent_id = $1",
+        agent_id,
+    )
+
+
+async def clear_pause(agent_id: str) -> None:
+    """Clear pause state for an agent."""
+    await upsert_risk_state(
+        agent_id=agent_id,
+        is_paused=False,
+        paused_reason=None,
+        paused_at=None,
+    )
+
+
+async def is_trader_paused(agent_id: str) -> bool:
+    """Check if a trader is currently paused."""
+    row = await get_risk_state(agent_id)
+    if not row:
+        return False
+    return bool(row.get("is_paused", False))
+
+
+async def get_all_risk_states() -> list[asyncpg.Record]:
+    """Get risk_state for all agents."""
+    return await fetch(
+        "SELECT * FROM trading.risk_state ORDER BY agent_id"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Schema initialisation helper
 # ---------------------------------------------------------------------------
 
