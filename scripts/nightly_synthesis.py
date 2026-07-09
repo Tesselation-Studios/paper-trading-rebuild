@@ -331,6 +331,10 @@ def main():
         "--canvas", action="store_true",
         help="Push summary to Canvas (requires CANVAS_URL + CANVAS_TOKEN).",
     )
+    parser.add_argument(
+        "--dashboard", action="store_true",
+        help="Push system health dashboard to Canvas after synthesis (uses src.canvas_dashboard).",
+    )
 
     args = parser.parse_args()
 
@@ -378,6 +382,18 @@ def main():
             print("\n[nightly_synthesis] Pushed to Canvas ✓")
         except Exception as e:
             print(f"\n[nightly_synthesis] Canvas push failed: {e}")
+
+    # Push system health dashboard
+    if args.dashboard and not args.dry_run:
+        try:
+            from src.canvas_dashboard import push_health_dashboard
+            card_uuid = push_health_dashboard(board="trading", expires_days=1)
+            if card_uuid:
+                print(f"\n[nightly_synthesis] Health dashboard pushed: {card_uuid}")
+            else:
+                print("\n[nightly_synthesis] Health dashboard push returned None")
+        except Exception as e:
+            print(f"\n[nightly_synthesis] Health dashboard push failed: {e}")
 
 
 def push_to_canvas(

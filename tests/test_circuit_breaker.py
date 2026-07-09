@@ -340,6 +340,8 @@ class TestEdgeCases:
         assert allowed
 
     def test_multiple_trips_counted(self):
+        from src.observability import metrics
+        metrics._gauges["circuit_breaker.active_tripped_traders"] = 0.0
         breaker = AgentCircuitBreaker("trader-test", max_tool_calls_per_tick=2)
         # First trip
         breaker.start_tick()
@@ -347,6 +349,21 @@ class TestEdgeCases:
         breaker.track("b", {})
         breaker.track("c", {})
         assert breaker.state.total_trips == 1
+        assert metrics._gauges.get("circuit_breaker.active_tripped_traders") == 1.0
+
+    def test_gauge_recovery_and_manual_reset(self):
+        from src.observability import metrics
+        breaker = AgentCircuitBreaker("trader-test-gauge", max_tool_calls_per_tick=2, auto_pause_minutes=1)
+        metrics._gauges["circuit_breaker.active_tripped_traders"] = 0.0
+        breaker.start_tick()
+        breaker.track("a", {})
+        breaker.track("b", {})
+        breaker.track("c", {})
+        assert metrics._gauges.get("circuit_breaker.active_tripped_traders") == 1.0
+
+        # Reset clear/decrement
+        breaker.reset()
+        assert metrics._gauges.get("circuit_breaker.active_tripped_traders") == 0.0
 
         # Reset and trip again
         breaker.start_tick()

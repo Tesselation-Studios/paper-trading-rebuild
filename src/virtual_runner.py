@@ -61,7 +61,7 @@ _config: Dict[str, Any] = {
     "interval": 300,  # seconds (5 min)
     "max_parallel": int(os.getenv("VT_MAX_PARALLEL", "24")),
     "starting_cash": float(os.getenv("VT_STARTING_CASH", "10000")),
-    "mock": False,    # True to bypass network and generate fake data
+    "mock": int(os.getenv("VT_MOCK", "0")) == 1 or False,    # True to bypass network and generate fake data
 }
 
 # Market hours (ET)

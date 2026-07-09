@@ -25,6 +25,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+# Allow both `python -m src.canvas_dashboard` and `python3 src/canvas_dashboard.py`
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
 from src.observability import metrics, alert
 
 

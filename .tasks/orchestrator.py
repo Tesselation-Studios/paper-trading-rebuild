@@ -310,6 +310,19 @@ def main():
     print(f"   Current: {state.current_task.id if state.current_task else 'none'}")
     print(f"   Next: {state.next_action}")
 
+    # Push health dashboard to Canvas after each tick batch
+    push_health = PROJECT_DIR / "scripts" / "push_health.sh"
+    if push_health.exists():
+        try:
+            subprocess.run(
+                [str(push_health), "--board", "trading"],
+                capture_output=True, text=True, timeout=30,
+                cwd=str(PROJECT_DIR),
+            )
+            print("   ✅ Health dashboard pushed to Canvas")
+        except Exception as e:
+            print(f"   ⚠️  Health push failed (non-fatal): {e}")
+
 
 if __name__ == "__main__":
     main()

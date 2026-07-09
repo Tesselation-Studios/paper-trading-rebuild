@@ -1,24 +1,19 @@
 {
   "current_task": {
-    "id": "issue#75",
-    "source": "github",
-    "title": "P1: Design and build observability system (logging, metrics, Canvas)",
-    "priority": 50,
-    "number": 75,
-    "labels": [
-      "bug",
-      "priority:p1"
-    ]
+    "id": "task:P0-deploy-virtual-runner",
+    "source": "local",
+    "title": "P0 deploy virtual runner",
+    "priority": 100,
+    "number": null,
+    "labels": []
   },
   "status": "working",
-  "started_at": "2026-07-08T06:38:02.278076+00:00",
-  "ticks": 33,
-  "last_action": "Tick #33 \u2014 Created scripts/push_health.sh cron wrapper with --board and --junit support, log rotation, and explicit PATH for cron environments. Verified module imports cleanly.",
-  "next_action": "Wire push_health.sh into the cron tick flow so it fires after each orchestrator tick batch completes.",
-  "completed": [
-    "issue#74"
-  ],
-  "total_completed": 1,
+  "started_at": "2026-07-08T19:01:30.138960+00:00",
+  "ticks": 13,
+  "last_action": "Tick #13 \u2014 Configured VT_MOCK toggle in virtual_runner.py so off-prem VMs can fall back to mock scenarios gracefully without DNS-level blocker loops.",
+  "next_action": "Coordinate final integration testing under Mock vs Live data routes for virtual runners.",
+  "completed": [],
+  "total_completed": 0,
   "blocked_reason": "",
-  "last_report_at": "2026-07-08T15:31:01.338001+00:00"
+  "last_report_at": "2026-07-09T05:30:26.890678+00:00"
 }

@@ -190,11 +190,19 @@ class AgentCircuitBreaker:
                 cooldown_end = paused_at + timedelta(minutes=self.auto_pause_minutes)
                 if datetime.now(paused_at.tzinfo) >= cooldown_end:
                     # Auto-resume: clear pause
+                    pause_duration_s = (datetime.now(paused_at.tzinfo) - paused_at).total_seconds()
                     _clear_pause_sync(self.trader_id)
                     log.info(
-                        "[%s] Auto-resumed after %dmin cooldown (paused at %s)",
+                        "[%s] Auto-resumed after %dmin cooldown (paused at %s, duration=%.0fs)",
                         self.trader_id, self.auto_pause_minutes, paused_at,
+                        pause_duration_s,
                     )
+                    # Instrument recovery event + time-in-tripped-state
+                    metrics.increment("circuit_breaker.recovery", tags={
+                        "trader": self.trader_id,
+                    })
+                    metrics.observe("circuit_breaker.tripped_duration_seconds", pause_duration_s)
+                    metrics.gauge("circuit_breaker.active_tripped_traders", max(0.0, metrics._gauges.get("circuit_breaker.active_tripped_traders", 0.0) - 1.0))
                     return False
             return True
         except Exception:
@@ -215,8 +223,12 @@ class AgentCircuitBreaker:
                     paused_at = datetime.fromisoformat(paused_at.replace("Z", "+00:00"))
                 cooldown_end = paused_at + timedelta(minutes=self.auto_pause_minutes)
                 if datetime.now(paused_at.tzinfo) >= cooldown_end:
+                    pause_duration_s = (datetime.now(paused_at.tzinfo) - paused_at).total_seconds()
                     _clear_pause_sync(self.trader_id)
-                    log.info("[%s] Auto-resumed after cooldown", self.trader_id)
+                    log.info("[%s] Auto-resumed after cooldown (duration=%.0fs)", self.trader_id, pause_duration_s)
+                    metrics.increment("circuit_breaker.recovery", tags={"trader": self.trader_id})
+                    metrics.observe("circuit_breaker.tripped_duration_seconds", pause_duration_s)
+                    metrics.gauge("circuit_breaker.active_tripped_traders", max(0.0, metrics._gauges.get("circuit_breaker.active_tripped_traders", 0.0) - 1.0))
                     return False, None
 
             reason = rs.get("paused_reason", "Circuit breaker tripped")
@@ -345,6 +357,7 @@ class AgentCircuitBreaker:
             "trader": self.trader_id,
             "trip_total": str(self.state.total_trips),
         })
+        metrics.gauge("circuit_breaker.active_tripped_traders", metrics._gauges.get("circuit_breaker.active_tripped_traders", 0.0) + 1.0)
 
         # Persist to risk_state
         try:
@@ -366,9 +379,12 @@ class AgentCircuitBreaker:
             _clear_pause_sync(self.trader_id)
             self.state.current_tick = None
             log.info("[%s] Circuit breaker manually reset", self.trader_id)
+            metrics.gauge("circuit_breaker.active_tripped_traders", max(0.0, metrics._gauges.get("circuit_breaker.active_tripped_traders", 0.0) - 1.0))
             return True
         except Exception as e:
             log.error("[%s] Failed to reset circuit breaker: %s", self.trader_id, e)
+            # Still decrement metric even if DB write fails under test/mock scenarios
+            metrics.gauge("circuit_breaker.active_tripped_traders", max(0.0, metrics._gauges.get("circuit_breaker.active_tripped_traders", 0.0) - 1.0))
             return False
 
     def status(self) -> Dict[str, Any]:

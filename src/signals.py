@@ -20,6 +20,8 @@ from typing import Any, ClassVar, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from src.observability import metrics
+
 log = logging.getLogger("signals")
 
 # ── Parameter bounds ─────────────────────────────────────────────────────────
@@ -349,6 +351,9 @@ class SignalEngine:
         Returns:
             SignalReport with all computed signals.
         """
+        import time as _time
+
+        t0 = _time.perf_counter()
         ticker = tick.ticker
         price = tick.close
 
@@ -438,6 +443,11 @@ class SignalEngine:
         composite = float(np.clip(composite, -1.0, 1.0))
 
         conviction = abs(composite)
+
+        # ── Observability: record signal throughput & compute latency ──
+        elapsed_ms = (_time.perf_counter() - t0) * 1000
+        metrics.increment("signals.computed", tags={"ticker": ticker})
+        metrics.observe("signals.compute_time_ms", elapsed_ms)
 
         return SignalReport(
             ticker=ticker,
@@ -658,6 +668,9 @@ def gradient_step(
         grad = compute_gradient(params, name, baseline, scorer)
         gradients[name] = grad
 
+        # ── Observability: record per-parameter gradient magnitude ──
+        metrics.observe("gradient.gradient_value", abs(grad))
+
         # Apply gradient
         b = SignalParams.bound(name)
         max_step = (b.max_val - b.min_val) * max_change_pct
@@ -667,6 +680,11 @@ def gradient_step(
         old_val = params.get(name)
         new_val = b.clip(old_val + step)
         params.set(name, new_val)
+
+        # ── Observability: record per-parameter change magnitude ──
+        delta = abs(new_val - old_val)
+        if delta > 1e-10:
+            metrics.observe("gradient.param_change", delta)
 
         # Record parameter change history (#23)
         if record_history and abs(new_val - old_val) > 1e-10:
@@ -686,5 +704,17 @@ def gradient_step(
                     "Failed to record param history for %s: %s — continuing",
                     name, e,
                 )
+
+    # ── Observability: step-level gradient descent metrics ──
+    metrics.increment("gradient.optimization_steps", tags={"trader": trader_id})
+    metrics.gauge("gradient.baseline_score", baseline)
+
+    # Re-score after all parameter updates to compute improvement delta
+    try:
+        after_score = scorer(params)
+        metrics.gauge("gradient.score_delta", after_score - baseline)
+        metrics.gauge("gradient.after_score", after_score)
+    except Exception as e:
+        log.warning("After-score failed for %s: %s", trader_id, e)
 
     return params, gradients
