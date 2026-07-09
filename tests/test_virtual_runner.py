@@ -33,7 +33,7 @@ def test_get_tracked_symbols():
 
 def test_offline_mode_behavior():
     # Set offline dynamic config override
-    vr._config["offline"] = True
+    vr._config["mock"] = True
 
     # 1. Tracked symbols
     symbols = vr.get_tracked_symbols()
@@ -71,4 +71,4 @@ def test_offline_mode_behavior():
     assert trade_id.startswith("vt-mock-")
 
     # Reset config for other tests
-    vr._config["offline"] = False
+    vr._config["mock"] = False
