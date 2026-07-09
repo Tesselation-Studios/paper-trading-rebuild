@@ -59,13 +59,23 @@ _CRED_MAP = {
 
 @contextmanager
 def _db():
-    """Context manager for DB connections — Postgres on docker.klo."""
+    """Context manager for DB connections — Postgres on docker.klo.
+    
+    Monkey-patches conn.execute() to use RealDictCursor so existing
+    SQLite-style conn.execute(sql, params).fetchone() calls work on pg.
+    """
     conn = None
     try:
         conn = psycopg2.connect("host=192.168.1.179 port=5433 dbname=trading user=trader")
         conn.autocommit = True
         with conn.cursor() as c:
             c.execute("SET search_path TO trading, public")
+        # Monkey-patch: conn.execute(sql, params) → RealDictCursor
+        def _pg_execute(sql, params=None):
+            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur.execute(sql, params)
+            return cur
+        conn.execute = _pg_execute
         yield conn
     finally:
         if conn:
@@ -112,7 +122,7 @@ def _get_portfolio_from_db(company: str) -> Optional[dict]:
                    FROM portfolio_snapshots
                    WHERE trader_id = %s
                    ORDER BY timestamp DESC LIMIT 1""",
-                (company,),
+                (f"trader-{company}",),
             ).fetchone()
         if not row:
             return None
