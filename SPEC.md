@@ -1676,51 +1676,11 @@ Before every market open, each trader's prompt + HEARTBEAT must be tested throug
 
 ---
 
-## §31 — Task Tracking System
-
-### 31.1 Workboard Plugin (Canonical)
-
-All tasks are tracked via OpenClaw's **Workboard plugin** — a SQLite-backed card system with status lifecycle, agent assignment, priority, dependency linking, diagnostics, and automated dispatch.
-
-### 31.2 Card Lifecycle
-
-```
-backlog → todo → ready → running → review → done
-                               ↓
-                            blocked
-```
-
-| Status | Meaning |
-|--------|---------|
-| `backlog` | Ideas / nice-to-haves / long-term — no active intent |
-| `todo` | Specified and prioritized, ready to be claimed |
-| `ready` | All dependencies met, dispatch-eligible |
-| `running` | Claimed by an agent session, actively being worked |
-| `review` | Work submitted, awaiting human sign-off |
-| `done` | Completed with summary, proof, and artifacts |
-| `blocked` | Cannot proceed — external dependency or unresolved issue |
-
-### 31.3 Automated Dispatch
-
-- **Orchestrator heartbeat** (every 30 min) runs a gardener pass: promotes unblocked `todo` → `ready`, reclaims stale claims, blocks timed-out runs, and surfaces stranded cards via diagnostics
-- **Dispatcher** (on-demand, e.g. `workboard_dispatch`) promotes `ready` cards to `running` when an agent slot is free
-- **Agents** claim cards via `workboard_claim` with a configurable TTL, refresh with `workboard_heartbeat`, and complete via `workboard_complete` with proof/artifacts
-
-### 31.4 Key Features
-
-- **Dependency linking**: cards can be blocked on parent cards; children auto-promote when parents complete
-- **Diagnostics**: stranded-ready detection, stale claims, failure tracking per attempt
-- **Worker logs**: per-card execution history with session keys and run IDs
-- **Attachments**: small binary/text artifacts stored in plugin KV store
-- **Proof system**: test results, screenshots, commit hashes attached per card
-
-### 31.5 GitHub Issues (Optional Mirror)
-
-Major milestones or cross-system tasks are mirrored to GitHub Issues on `Tesselation-Studios/paper-trading-teams` for external visibility. The workboard is the source of truth."}
+<!-- §31 removed — task tracking moved to workspace TASK_TRACKING.md -->"}
 
 ---
 
-## §32 — Hermes Architecture Plan Integration
+## §31 — Hermes Architecture Plan Integration
 
 ### 32.1 Reference
 
