@@ -297,6 +297,65 @@ def insert_trade(
     return trade_id
 
 
+def log_to_virtual_traders_log(
+    trader_name: str,
+    ticker: str,
+    decision: str,
+    conviction: Optional[float],
+    rationale: str,
+    price: float,
+    regime: Optional[str],
+    composite_signal: Optional[float],
+    equity_before: Optional[float] = None,
+    equity_after: Optional[float] = None,
+    pnl: Optional[float] = None,
+    error: Optional[str] = None,
+    duration_ms: Optional[int] = None,
+):
+    """Log a virtual trader decision to the virtual_traders_log table.
+
+    This is a best-effort, non-critical logging call. Failures are logged
+    but do not bubble up (one virtual failing to log should not crash others).
+    """
+    if _config.get("mock"):
+        log.debug(
+            "[MOCK LOG] trader=%s ticker=%s decision=%s conv=%s",
+            trader_name, ticker, decision, conviction,
+        )
+        return
+
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        now = datetime.now(timezone.utc)
+        cur.execute(
+            """INSERT INTO trading.virtual_traders_log
+               (trader_name, run_at, ticker, decision, conviction, rationale,
+                price, regime, composite_signal, equity_before, equity_after,
+                pnl, error, duration_ms)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+            (
+                trader_name,
+                now,
+                ticker,
+                decision,
+                conviction,
+                rationale[:500],  # Truncate long rationales
+                price,
+                regime,
+                composite_signal,
+                equity_before,
+                equity_after,
+                pnl,
+                error,
+                duration_ms,
+            ),
+        )
+        conn.close()
+    except Exception as e:
+        log.debug("Failed to log to virtual_traders_log: %s", e)
+
+
 # ── Portfolio State (per-virtual) ─────────────────────────────────────────────
 
 
@@ -521,7 +580,9 @@ def run_one_trader(
             agent_files=agent_files,
         )
 
-        # Log to database (only for BUY/SELL)
+        # Log to virtual_traders_log for ALL decisions (including HOLD)
+        equity_before = virtual_portfolio.total_equity
+
         if llm_decision.decision in ("BUY", "SELL"):
             insert_trade(
                 trader_id=trader_name,
@@ -548,6 +609,20 @@ def run_one_trader(
             "source": trade_source,
         }
 
+        # Log to virtual_traders_log
+        log_to_virtual_traders_log(
+            trader_name=trader_name,
+            ticker=best_ticker.ticker,
+            decision=llm_decision.decision,
+            conviction=llm_decision.conviction,
+            rationale=llm_decision.rationale,
+            price=best_ticker.close,
+            regime=best_signal.regime,
+            composite_signal=best_signal.composite_signal,
+            equity_before=equity_before,
+            equity_after=virtual_portfolio.total_equity,  # approximate
+        )
+
         log.info(
             "  %-24s %s:%-6s conv=%s signal=%s regime=%s source=%s",
             trader_name, result["ticker"], result["decision"],
@@ -559,7 +634,23 @@ def run_one_trader(
         return result
 
     except Exception as e:
-        log.error("  %-24s ERROR: %s", trader_name, e, exc_info=True)
+        error_msg = str(e)
+        log.error("  %-24s ERROR: %s", trader_name, error_msg, exc_info=True)
+
+        # Log the error to virtual_traders_log
+        if best_ticker is not None:
+            log_to_virtual_traders_log(
+                trader_name=trader_name,
+                ticker=best_ticker.ticker,
+                decision="ERROR",
+                conviction=None,
+                rationale="",
+                price=best_ticker.close,
+                regime=best_signal.regime if best_signal else None,
+                composite_signal=best_signal.composite_signal if best_signal else None,
+                error=error_msg,
+            )
+
         return None
 
 
@@ -718,6 +809,201 @@ def run_once(
         log.warning("Learning loop cycle failed: %s", e)
 
     return summary
+
+
+# ── Public API: simplified wrappers ───────────────────────────────────────────
+
+def run_all_virtuals(tick_data: dict) -> list[dict]:
+    """Run all active virtual traders against the given tick data.
+
+    Args:
+        tick_data: A dict with at least {"symbol": str, "price": float}.
+                   Optionally can include "open", "high", "low", "volume",
+                   "rsi", "momentum", "volatility", "regime".
+
+    Returns:
+        List of dicts with {trader, base, ticker, decision, conviction,
+                            rationale, price, regime, composite_signal,
+                            source, error} for each virtual trader.
+
+    This is a lightweight wrapper around run_one_trader() that:
+      1. Loads virtual traders from the DB
+      2. Converts tick_data to Tick objects
+      3. Runs each virtual trader sequentially
+      4. Returns structured results
+
+    Example:
+        >>> results = run_all_virtuals({"symbol": "SPY", "price": 550.0})
+        >>> print(results)
+    """
+    # Parse tick_data into a list of Tick objects
+    symbol = tick_data.get("symbol", "UNKNOWN")
+    price = tick_data.get("price", 0.0)
+
+    tick = Tick(
+        timestamp=datetime.now(timezone.utc),
+        ticker=symbol,
+        open=tick_data.get("open", price),
+        high=tick_data.get("high", price),
+        low=tick_data.get("low", price),
+        close=price,
+        volume=tick_data.get("volume", 0),
+        rsi=tick_data.get("rsi"),
+        momentum=tick_data.get("momentum"),
+        volatility=tick_data.get("volatility"),
+        regime=tick_data.get("regime"),
+    )
+    ticks = [tick]
+
+    # Refresh live equity cache
+    refresh_live_equities()
+
+    # Load virtual traders from DB
+    virtuals = load_virtual_traders()
+
+    if not virtuals:
+        log.warning("run_all_virtuals: no active virtual traders found")
+        return []
+
+    # Create LLM engine
+    engine = LLMEngine(
+        model=_config["model"],
+        temperature=0.3,
+        max_tokens=2000,
+        max_retries=2,
+    )
+
+    results: list[dict] = []
+    for vt in virtuals:
+        try:
+            agent_files = PROMPT_DEFAULTS.get(
+                vt["base_trader"], PROMPT_DEFAULTS["kairos"]
+            )
+            result = run_one_trader(
+                trader_name=vt["name"],
+                base_trader=vt["base_trader"],
+                config=vt.get("config", {}),
+                ticks=ticks,
+                engine=engine,
+                agent_files=agent_files,
+                trade_source="virtual",
+            )
+            if result:
+                results.append(result)
+        except Exception as e:
+            log.error("run_all_virtuals: %s failed: %s", vt["name"], e)
+            results.append({
+                "trader": vt["name"],
+                "base": vt["base_trader"],
+                "ticker": symbol,
+                "decision": "ERROR",
+                "conviction": None,
+                "rationale": str(e),
+                "price": price,
+                "regime": None,
+                "composite_signal": None,
+                "source": "virtual",
+                "error": str(e),
+            })
+
+    return results
+
+
+def run_one_virtual(trader_config: dict, tick_data: dict) -> dict:
+    """Run one specific virtual trader against the given tick data.
+
+    Args:
+        trader_config: Dict with keys:
+            - "name": trader name (e.g. "test-aldridge-1")
+            - "base_trader": base trader ("aldridge", "kairos", "stonks")
+            - "config": optional dict of variant overrides
+        tick_data: A dict with at least {"symbol": str, "price": float}.
+
+    Returns:
+        Dict with {trader, base, ticker, decision, conviction, rationale,
+                   price, regime, composite_signal, source, error}.
+
+    Example:
+        >>> result = run_one_virtual(
+        ...     {"name": "test-aldridge-1", "base_trader": "aldridge", "config": {}},
+        ...     {"symbol": "SPY", "price": 550.0}
+        ... )
+        >>> print(result)
+    """
+    name = trader_config.get("name", "unknown")
+    base = trader_config.get("base_trader", "kairos")
+    config = trader_config.get("config", {})
+
+    symbol = tick_data.get("symbol", "UNKNOWN")
+    price = tick_data.get("price", 0.0)
+
+    tick = Tick(
+        timestamp=datetime.now(timezone.utc),
+        ticker=symbol,
+        open=tick_data.get("open", price),
+        high=tick_data.get("high", price),
+        low=tick_data.get("low", price),
+        close=price,
+        volume=tick_data.get("volume", 0),
+        rsi=tick_data.get("rsi"),
+        momentum=tick_data.get("momentum"),
+        volatility=tick_data.get("volatility"),
+        regime=tick_data.get("regime"),
+    )
+
+    # Refresh live equity cache
+    refresh_live_equities()
+
+    # Create LLM engine
+    engine = LLMEngine(
+        model=_config["model"],
+        temperature=0.3,
+        max_tokens=2000,
+        max_retries=2,
+    )
+
+    agent_files = PROMPT_DEFAULTS.get(base, PROMPT_DEFAULTS["kairos"])
+
+    try:
+        result = run_one_trader(
+            trader_name=name,
+            base_trader=base,
+            config=config,
+            ticks=[tick],
+            engine=engine,
+            agent_files=agent_files,
+            trade_source="virtual",
+        )
+        if result is None:
+            return {
+                "trader": name,
+                "base": base,
+                "ticker": symbol,
+                "decision": "HOLD",
+                "conviction": None,
+                "rationale": "No actionable signal",
+                "price": price,
+                "regime": None,
+                "composite_signal": None,
+                "source": "virtual",
+                "error": None,
+            }
+        return result
+    except Exception as e:
+        log.error("run_one_virtual: %s failed: %s", name, e)
+        return {
+            "trader": name,
+            "base": base,
+            "ticker": symbol,
+            "decision": "ERROR",
+            "conviction": None,
+            "rationale": str(e),
+            "price": price,
+            "regime": None,
+            "composite_signal": None,
+            "source": "virtual",
+            "error": str(e),
+        }
 
 
 # ── Helper: table formatter ───────────────────────────────────────────────────
