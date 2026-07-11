@@ -47,7 +47,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.signals import SignalEngine, SignalParams, SignalReport
 from src.llm_engine import LLMEngine
-from src.prompt_builder import PromptBuilder, AgentFiles, DEFAULTS as PROMPT_DEFAULTS
+from src.prompt_builder import PromptBuilder, DEFAULTS as PROMPT_DEFAULTS
+from src.agent_files import AgentFiles
 from src.replay import Tick, Portfolio, TraderDecision
 
 log = logging.getLogger("virtual_runner")

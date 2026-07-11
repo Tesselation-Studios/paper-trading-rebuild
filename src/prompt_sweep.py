@@ -235,13 +235,14 @@ def _extract_params_from_prompt(prompt_text: str) -> SignalParams:
         params.base_size_pct = 0.10
     elif "momentum" in text_lower and "value" not in text_lower:
         # Momentum-focused trader → higher momentum weights
-        params.momentum_threshold = 0.5
+        params.momentum_threshold = 0.003
         params.weight_trending_up = 1.3
         params.weight_trending_down = 0.4
         params.weight_mean_reverting = 0.6
     elif "value" in text_lower or "fundamental" in text_lower:
         # Value-focused trader → longer lookback, mean reversion
         params.momentum_lookback = 30
+        params.momentum_threshold = 0.002
         params.weight_mean_reverting = 1.2
         params.weight_trending_up = 0.8
         params.rsi_oversold = 25.0
@@ -438,9 +439,10 @@ def _load_dates_data(
             start = dates[0]
             end = dates[-1]
             ticks = loader.load_date_range(
-                tickers=tickers or ["SPY", "AAPL", "MSFT", "NVDA", "TSLA", "META", "GOOGL", "AMZN"],
+                tickers=tickers or ["SPY", "AAPL", "MSFT", "NVDA"],
                 start_date=start,
                 end_date=end,
+                interval_minutes=5,
             )
             if ticks:
                 return ticks
@@ -675,9 +677,8 @@ def make_signal_trader(params: SignalParams) -> Callable[[Tick, Portfolio], Trad
                 rationale="Position held",
             )
 
-        # Entry logic: only enter on bullish signals with sufficient conviction
+        # Entry logic: momentum signal gates, position sized by conviction
         if (report.momentum_signal == "BULLISH"
-                and report.conviction >= 0.4
                 and portfolio.position_count < report.max_positions):
             return TraderDecision(
                 ticker=tick.ticker,
@@ -1045,7 +1046,7 @@ def run_sweep(
 
     # ── Single-date mode (backward compatible) ────────────────────────────
     if n_dates <= 1:
-        ticks = load_historical_ticks(date_str)
+        ticks = _load_dates_data([date_str])
         print(f"[prompt_sweep] Loaded {len(ticks)} ticks for {date_str}")
 
         results: List[SweepResult] = []

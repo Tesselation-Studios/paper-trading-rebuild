@@ -16,11 +16,12 @@ import re
 import time
 import urllib.request
 import urllib.error
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from src.replay import Tick, Portfolio, TraderDecision
+from src.prompt_builder import PromptBuilder
+from src.agent_files import AgentFiles
 
 # Forward ref for type hints (avoid circular imports)
 from typing import TYPE_CHECKING
@@ -48,21 +49,6 @@ def _load_api_key() -> str:
 
 
 # ── Engine ────────────────────────────────────────────────────────────────────
-
-
-@dataclass
-class AgentFiles:
-    """Agent context files loaded at simulation start."""
-    identity: str = ""    # IDENTITY.md
-    agents_md: str = ""   # AGENTS.md — the operating manual
-    soul: str = ""        # SOUL.md — personality
-    tools: str = ""       # TOOLS.md — local setup
-    memory: str = ""      # MEMORY.md — persistent learnings
-    skills: List[str] = None  # skill names with 1-line summaries
-
-    def __post_init__(self):
-        if self.skills is None:
-            self.skills = []
 
 
 class LLMEngine:
@@ -162,57 +148,17 @@ class LLMEngine:
         agent_files: AgentFiles,
         reflection_context: str = "",
     ) -> str:
-        """Assemble the full prompt from agent files + data + journal + reflections."""
-        # Journal context (last 10 entries, one sentence each)
-        journal_text = "\n".join(journal[-10:]) if journal else "(start of day)"
+        """Assemble the full prompt from agent files + data + journal + reflections.
 
-        # Build compact signal summary
-        signal_text = (
-            f"Ticker: {tick.ticker} | Price: ${tick.close:.2f} | "
-            f"Volume: {tick.volume:,}"
-        )
-        if tick.rsi is not None:
-            signal_text += f" | RSI: {tick.rsi:.1f}"
-        if tick.momentum is not None:
-            signal_text += f" | Momentum: {tick.momentum:.4f}"
-        if tick.regime:
-            signal_text += f" | Regime: {tick.regime}"
-
-        # Compute signal stats if available
-        try:
-            signal_text += (
-                f"\nComposite: {signal.composite_signal:.2f} | "
-                f"Conviction: {signal.conviction:.2f}"
-            )
-        except (AttributeError, TypeError):
-            pass
-
-        # Portfolio snapshot
-        positions_text = ", ".join(
-            f"{tkr}: {p.shares}sh @ ${p.entry_price:.2f} (now ${p.current_price:.2f})"
-            for tkr, p in portfolio.positions.items()
-        ) if portfolio.positions else "none"
-
-        portfolio_text = (
-            f"Cash: ${portfolio.cash:,.2f} | "
-            f"Equity: ${portfolio.total_equity:,.2f} | "
-            f"Positions ({portfolio.position_count}): {positions_text}"
-        )
-
-        # Skills summary
-        skills_text = "\n".join(f"- {s}" for s in agent_files.skills) if agent_files.skills else "(standard tools)"
-
-        return (
-            f"{agent_files.agents_md}\n\n"
-            f"## Personality\n{agent_files.soul}\n\n"
-            f"## Available Tools\n{skills_text}\n\n"
-            f"## Market Memory\n{agent_files.memory}\n\n"
-            f"{reflection_context}\n"
-            f"## Today's Decisions\n{journal_text}\n\n"
-            f"## Current Market Data\n{signal_text}\n\n"
-            f"## Portfolio\n{portfolio_text}\n\n"
-            f"Respond with JSON: {{\"decision\": \"BUY|SELL|HOLD\", "
-            f"\"conviction\": 0.0-1.0, \"rationale\": \"...\"}}"
+        Delegates to PromptBuilder for the canonical prompt assembly.
+        """
+        return PromptBuilder._assemble_prompt(
+            tick=tick,
+            signal=signal,
+            journal=journal,
+            portfolio=portfolio,
+            agent_files=agent_files,
+            reflection_context=reflection_context,
         )
 
     def _call_api(self, prompt: str) -> Optional[str]:
