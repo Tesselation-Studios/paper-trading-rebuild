@@ -2374,9 +2374,10 @@ def _fetch_rss(url):
     return posts
 
 
-def _fetch_social_bluesky(max_tickers: int = 0, deadline: float = 0) -> dict:
+def _fetch_social_bluesky(max_tickers: int = 5, deadline: float = 0) -> dict:
     """Fetch Bluesky sentiment for tracked symbols. Set max_tickers > 0 to limit live fetches.
-    If deadline > 0, abort early after wall-clock deadline (Unix timestamp)."""
+    If deadline > 0, abort early after wall-clock deadline (Unix timestamp).
+    Per-ticker deadline guard: each individual ticker call has a 5-second hard timeout."""
     if not fetch_bluesky_sentiment:
         return {"source": "bluesky", "posts": [], "sentiment_score": 0.0, "matched_tickers": [], "error": "social_sentiment module unavailable"}
 
@@ -2390,13 +2391,20 @@ def _fetch_social_bluesky(max_tickers: int = 0, deadline: float = 0) -> dict:
     matched_tickers = set()
     total_score = 0.0
     total_weight = 0
+    PER_TICKER_TIMEOUT = 5  # seconds per ticker
 
     for ticker in tickers:
         if deadline > 0 and time.time() > deadline:
             log.debug("Bluesky: deadline reached, stopping after %d tickers", len(matched_tickers))
             break
         try:
-            result = fetch_bluesky_sentiment(ticker)
+            with ThreadPoolExecutor(max_workers=1) as _inner_pool:
+                future = _inner_pool.submit(fetch_bluesky_sentiment, ticker)
+                result = future.result(timeout=PER_TICKER_TIMEOUT)
+        except FutureTimeoutError:
+            log.debug("Bluesky per-ticker timeout for %s (>%ss, deadline: %.1fs away)",
+                      ticker, PER_TICKER_TIMEOUT, max(0, deadline - time.time()) if deadline > 0 else -1)
+            continue
         except Exception as e:
             log.debug("Bluesky fetch failed for %s: %s", ticker, e)
             continue
@@ -2417,9 +2425,10 @@ def _fetch_social_bluesky(max_tickers: int = 0, deadline: float = 0) -> dict:
     }
 
 
-def _fetch_social_stocktwits(max_tickers: int = 0, deadline: float = 0) -> dict:
+def _fetch_social_stocktwits(max_tickers: int = 5, deadline: float = 0) -> dict:
     """Fetch Stocktwits sentiment for tracked symbols. Set max_tickers > 0 to limit live fetches.
-    If deadline > 0, abort early after wall-clock deadline (Unix timestamp)."""
+    If deadline > 0, abort early after wall-clock deadline (Unix timestamp).
+    Per-ticker deadline guard: each individual ticker call has a 5-second hard timeout."""
     if not fetch_stocktwits_sentiment:
         return {"source": "stocktwits", "posts": [], "sentiment_score": 0.0, "matched_tickers": [], "error": "social_sentiment module unavailable"}
 
@@ -2433,13 +2442,20 @@ def _fetch_social_stocktwits(max_tickers: int = 0, deadline: float = 0) -> dict:
     matched_tickers = set()
     total_score = 0.0
     total_weight = 0
+    PER_TICKER_TIMEOUT = 5  # seconds per ticker
 
     for ticker in tickers:
         if deadline > 0 and time.time() > deadline:
             log.debug("Stocktwits: deadline reached, stopping after %d tickers", len(matched_tickers))
             break
         try:
-            result = fetch_stocktwits_sentiment(ticker)
+            with ThreadPoolExecutor(max_workers=1) as _inner_pool:
+                future = _inner_pool.submit(fetch_stocktwits_sentiment, ticker)
+                result = future.result(timeout=PER_TICKER_TIMEOUT)
+        except FutureTimeoutError:
+            log.debug("Stocktwits per-ticker timeout for %s (>%ss, deadline: %.1fs away)",
+                      ticker, PER_TICKER_TIMEOUT, max(0, deadline - time.time()) if deadline > 0 else -1)
+            continue
         except Exception as e:
             log.debug("Stocktwits fetch failed for %s: %s", ticker, e)
             continue
@@ -3460,6 +3476,31 @@ def _get_data_source_health() -> List[dict]:
         "rate_limit": "10/min",
         "stats": ins,
     })
+
+    # ── Social sentiment sources ────────────────────────────────────────
+    social_sources = [
+        ("Bluesky", "social:bluesky"),
+        ("StockTwits", "social:stocktwits"),
+        ("Reddit", "social:reddit"),
+    ]
+    for sname, cache_key in social_sources:
+        cached = _cache.get(cache_key, TTL.get("social", 900))
+        if cached and cached.get("posts"):
+            status = "green"
+        elif cached and cached.get("error"):
+            status = "red"
+        else:
+            status = "yellow"
+        sources.append({
+            "name": sname,
+            "status": status,
+            "last_fetch_sec": None,
+            "rate_limit": "—",
+            "stats": {
+                "hits": len(cached.get("posts", [])) if cached else 0,
+                "tickers": len(cached.get("matched_tickers", [])) if cached else 0,
+            },
+        })
 
     return sources
 
@@ -5107,33 +5148,77 @@ def _scheduled_momentum():
 
 
 def _scheduled_fetch_social():
-    """Pre-fetch social sentiment for all tracked symbols (all sources)."""
+    """Pre-fetch social sentiment for all tracked symbols (all sources).
+
+    Runs Bluesky, StockTwits, and Reddit fetches in parallel via
+    ThreadPoolExecutor to avoid wall-clock blowout from sequential calls.
+    Each individual ticker call inside Bluesky/Stocktwits also has a
+    per-ticker deadline guard via ThreadPoolExecutor + timeout.
+    """
     if not _tracked_symbols:
         return
-    try:
-        bsky = _fetch_social_bluesky()
-        st = _fetch_social_stocktwits()
-        rdt = _fetch_social_reddit()
-        result = {
-            "source": "all",
-            "results": [bsky, st, rdt],
+
+    SCHEDULED_FETCH_TIMEOUT = 90  # total wall-clock timeout for the batch
+
+    def _fetch_with_label(fn, label) -> tuple:
+        try:
+            return (label, fn())
+        except Exception as e:
+            log.error("Scheduled social %s fetch failed: %s", label, e)
+            return (label, {"source": label, "posts": [], "sentiment_score": 0.0,
+                            "matched_tickers": [], "error": str(e)})
+
+    fetch_funcs = [
+        (lambda: _fetch_social_bluesky(), "bluesky"),
+        (lambda: _fetch_social_stocktwits(), "stocktwits"),
+        (lambda: _fetch_social_reddit(), "reddit"),
+    ]
+
+    results_map = {}
+    with ThreadPoolExecutor(max_workers=3) as exec:
+        future_map = {
+            exec.submit(_fetch_with_label, fn, label): label
+            for fn, label in fetch_funcs
         }
-        _cache.set("social:all", result)
-        _cache.set("social:bluesky", bsky)
-        _cache.set("social:stocktwits", st)
-        _cache.set("social:reddit", rdt)
-        total_posts = sum(len(r.get("posts", [])) for r in result["results"])
-        total_tickers = set()
-        for r in result["results"]:
-            total_tickers.update(r.get("matched_tickers", []))
-        log.info("Social: %d posts across %d tickers (bluesky=%d, stocktwits=%d, reddit=%d)",
-                 total_posts, len(total_tickers),
-                 len(bsky.get("posts", [])),
-                 len(st.get("posts", [])),
-                 len(rdt.get("posts", [])))
-    except Exception as e:
-        log.error("Scheduled social fetch failed: %s", e)
-        raise
+        try:
+            for future in as_completed(future_map, timeout=SCHEDULED_FETCH_TIMEOUT):
+                label, data = future.result()
+                results_map[label] = data
+        except FutureTimeoutError:
+            log.warning("Scheduled social fetch timed out after %ss (partial results)",
+                        SCHEDULED_FETCH_TIMEOUT)
+        for future in future_map:
+            future.cancel()
+
+    # Fill in any missing sources with empty results
+    for _, label in fetch_funcs:
+        if label not in results_map:
+            results_map[label] = {
+                "source": label, "posts": [], "sentiment_score": 0.0,
+                "matched_tickers": [], "error": "timeout",
+            }
+
+    bsky = results_map.get("bluesky", {})
+    st = results_map.get("stocktwits", {})
+    rdt = results_map.get("reddit", {})
+
+    result = {
+        "source": "all",
+        "results": [bsky, st, rdt],
+    }
+    _cache.set("social:all", result)
+    _cache.set("social:bluesky", bsky)
+    _cache.set("social:stocktwits", st)
+    _cache.set("social:reddit", rdt)
+    total_posts = sum(len(r.get("posts", [])) for r in result["results"])
+    total_tickers = set()
+    for r in result["results"]:
+        total_tickers.update(r.get("matched_tickers", []))
+    log.info("Social: %d posts across %d tickers (bluesky=%d, stocktwits=%d, reddit=%d)",
+             total_posts, len(total_tickers),
+             len(bsky.get("posts", [])),
+             len(st.get("posts", [])),
+             len(rdt.get("posts", [])))
 
 
 def _scheduled_fetch_macro():
