@@ -1,1249 +1,644 @@
 #!/usr/bin/env python3
 """
-Unified Learning Loop — trade grading, pattern analysis, param optimization,
-and end-to-end loop orchestration for the Postgres-based rebuild.
+src/learning_loop.py — Unified entry point: grade → analyze → synthesize → promote.
 
-Ported from paper-trading-teams/src/learning_loop.py.
-Key changes from the legacy version:
-  - Replaces SQLite/YAML with Postgres (psycopg2 via src.db.connection)
-  - Replaces paper-trading-agents repo YAML patch writing with DB persistence
-  - Config loaded from trading.virtual_traders (JSONB) instead of filesystem YAML
-  - Optimization proposals stored in trading.param_history
+Ties together:
+  - src/journal_analyzer.py  (heuristic analysis of trader decisions)
+  - src/synthesis.py          (nightly synthesis + auto-promotion)
+  - src/simulator.py          (analyze_sweep, run_nightly_synthesis)
 
-Architecture
-  grade_trade(trade, market_data, timestamp) → Grade
-  analyze_patterns(trades)                   → List[PatternInsight]
-  optimize_params(strategy, trades)          → ParamOptimization
-  run_loop(agent_id, since_date)             → LearningLoopResult
-
-All scoring functions are pure — they accept optional ``timestamp`` for
-harness compatibility. DB I/O is isolated to config loading and result
-persistence.
-
-Usage:
-    from src.learning_loop import grade_trade, analyze_patterns, optimize_params, run_loop
-
-    grade = grade_trade(trade, market_data)
-    insights = analyze_patterns(graded_trades)
-    proposal = optimize_params("kairos", graded_trades)
-    result = run_loop("trader-kairos", trades=[...])
+Usage (CLI):
+    python3 -m src.learning_loop --agent trader-kairos      # single trader
+    python3 -m src.learning_loop --all                       # all traders
+    python3 -m src.learning_loop --agent trader-kairos --inject-test-data  # inject + analyze
+    python3 -m src.learning_loop --health                    # check system health
 """
 
 from __future__ import annotations
 
+import argparse
 import json
-import logging
-import math
-import os
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+import random
+import sqlite3
+import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from src.db.connection import get_connection
+# ── Path setup ───────────────────────────────────────────────────────────────
+PROJECT_DIR = Path(__file__).resolve().parent.parent
+DB_PATH = PROJECT_DIR / "shared" / "trader.db"
 
-log = logging.getLogger(__name__)
+sys.path.insert(0, str(PROJECT_DIR))
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Constants
-# ═══════════════════════════════════════════════════════════════════════════
+from src.journal_analyzer import analyze_journal, JournalInsight
+from src.synthesis import synthesize_nightly, Synthesizer, NightlySummary
+from src.simulator import run_nightly_synthesis as sim_run_nightly_synthesis
 
-_CATEGORY_WEIGHTS = {
-    "entry_timing": 0.30,
-    "exit_timing": 0.30,
-    "risk_management": 0.25,
-    "conviction": 0.15,
+# ═══════════════════════════════════════════════════════════════════════════════
+# DB helpers
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def get_db() -> sqlite3.Connection:
+    db = sqlite3.connect(str(DB_PATH))
+    db.row_factory = sqlite3.Row
+    db.execute("PRAGMA journal_mode=WAL")
+    db.execute("PRAGMA foreign_keys=ON")
+    return db
+
+
+def get_agents() -> List[str]:
+    db = get_db()
+    cur = db.execute("SELECT agent_id FROM agent_profile ORDER BY agent_id")
+    agents = [r["agent_id"] for r in cur.fetchall()]
+    db.close()
+    return agents
+
+
+def get_decisions(agent_id: str, limit: int = 50) -> List[Dict]:
+    db = get_db()
+    cur = db.execute(
+        """SELECT * FROM decisions
+           WHERE agent_id = ? 
+           ORDER BY timestamp DESC 
+           LIMIT ?""",
+        (agent_id, limit),
+    )
+    rows = [dict(r) for r in cur.fetchall()]
+    db.close()
+    return rows
+
+
+def get_trades(agent_id: str, limit: int = 50) -> List[Dict]:
+    db = get_db()
+    cur = db.execute(
+        """SELECT * FROM trades
+           WHERE agent_id = ?
+           ORDER BY timestamp DESC
+           LIMIT ?""",
+        (agent_id, limit),
+    )
+    rows = [dict(r) for r in cur.fetchall()]
+    db.close()
+    return rows
+
+
+def get_journal(agent_id: str, limit: int = 50) -> List[str]:
+    db = get_db()
+    cur = db.execute(
+        """SELECT entry FROM journal
+           WHERE agent_id = ?
+           ORDER BY timestamp DESC
+           LIMIT ?""",
+        (agent_id, limit),
+    )
+    entries = [r["entry"] for r in cur.fetchall()]
+    db.close()
+    return entries
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Test data injection
+# ═══════════════════════════════════════════════════════════════════════════════
+
+TEST_DECISIONS = {
+    "trader-kairos": [
+        {
+            "action": "BUY",
+            "ticker": "NVDA",
+            "quantity": 10,
+            "confidence": 0.75,
+            "thesis": "Momentum breakout on above-average volume — MACD bullish crossover, strong sector rotation into semiconductors",
+            "mood": "excited",
+            "signals_used": ["momentum_breakout", "volume_surge", "macd_bullish_crossover"],
+        },
+        {
+            "action": "BUY",
+            "ticker": "AMD",
+            "quantity": 15,
+            "confidence": 0.65,
+            "thesis": "Relative strength against NVDA, catching up on AI chip demand narrative. RSI at 58 — room to run",
+            "mood": "optimistic",
+            "signals_used": ["relative_strength", "sector_rotation", "rsi_mid"],
+        },
+        {
+            "action": "SELL",
+            "ticker": "NVDA",
+            "quantity": 10,
+            "confidence": 0.70,
+            "thesis": "Hit 8% profit target. Momentum stalling — volume declining, RSI hit 72. Lock in gains",
+            "mood": "satisfied",
+            "signals_used": ["profit_target", "rsi_overbought", "volume_decline"],
+        },
+        {
+            "action": "BUY",
+            "ticker": "AVGO",
+            "quantity": 8,
+            "confidence": 0.55,
+            "thesis": "Momentum signal from data bus — unusual options flow detected. Heavy call buying before earnings",
+            "mood": "curious",
+            "signals_used": ["unusual_options_flow", "earnings_drift", "momentum"],
+        },
+        {
+            "action": "HOLD",
+            "ticker": "",
+            "quantity": 0,
+            "confidence": 0.40,
+            "thesis": "No strong signals across watchlist. AMD position still developing. Waiting for clearer setup",
+            "mood": "patient",
+            "signals_used": ["no_candidates"],
+        },
+    ],
+    "trader-aldridge": [
+        {
+            "action": "BUY",
+            "ticker": "JPM",
+            "quantity": 5,
+            "confidence": 0.72,
+            "thesis": "Banking sector oversold — P/E at 5-year low, strong insider buying reported. Dividend yield attractive at current levels",
+            "mood": "thoughtful",
+            "signals_used": ["fundamental_value", "rsi_oversold", "insider_buying"],
+        },
+        {
+            "action": "BUY",
+            "ticker": "KO",
+            "quantity": 20,
+            "confidence": 0.80,
+            "thesis": "Core position. Coca-Cola at support levels with strong balance sheet. Defensive play in uncertain market",
+            "mood": "confident",
+            "signals_used": ["core_position", "support_level", "defensive_quality"],
+        },
+        {
+            "action": "BUY",
+            "ticker": "PG",
+            "quantity": 15,
+            "confidence": 0.78,
+            "thesis": "Consumer staple at reasonable valuation. P&G has pricing power and consistent dividend growth. Patricia approved this pick",
+            "mood": "measured",
+            "signals_used": ["dividend_growth", "pricing_power", "sector_stability"],
+        },
+        {
+            "action": "HOLD",
+            "ticker": "",
+            "quantity": 0,
+            "confidence": 0.55,
+            "thesis": "Core positions held. KO and PG performing as expected. Monitoring JPM for additional entry. No rush to deploy capital",
+            "mood": "patient",
+            "signals_used": ["portfolio_balance"],
+        },
+        {
+            "action": "HOLD",
+            "ticker": "",
+            "quantity": 0,
+            "confidence": 0.50,
+            "thesis": "Market choppy. The Committee discussed increasing cash buffer to 15%. Waiting for clearer fundamental signals",
+            "mood": "cautious",
+            "signals_used": ["macro_uncertainty", "portfolio_defense"],
+        },
+    ],
+    "trader-stonks": [
+        {
+            "action": "BUY",
+            "ticker": "GME",
+            "quantity": 25,
+            "confidence": 0.60,
+            "thesis": "Social media heating up — heavy call buying detected on unusual options flow. WSB mentions spiking. YOLO energy is real",
+            "mood": "pumped",
+            "signals_used": ["social_momentum", "unusual_options_flow", "wsb_mentions"],
+        },
+        {
+            "action": "BUY",
+            "ticker": "DJT",
+            "quantity": 20,
+            "confidence": 0.45,
+            "thesis": "Bluesky chatter picking up. Low float + high short interest = squeeze potential. Risky but could moon",
+            "mood": "reckless",
+            "signals_used": ["social_sentiment", "short_squeeze_potential", "low_float"],
+        },
+        {
+            "action": "SELL",
+            "ticker": "GME",
+            "quantity": 25,
+            "confidence": 0.65,
+            "thesis": "GME hit 12% gain in 2 hours. Volume fading, WSB mentions cooling. Taking profits before the dump",
+            "mood": "giddy",
+            "signals_used": ["profit_target", "volume_fade", "sentiment_peak"],
+        },
+        {
+            "action": "HOLD",
+            "ticker": "",
+            "quantity": 0,
+            "confidence": 0.30,
+            "thesis": "Everything looks dead. No social pickup, no flow. Staying in cash until something interesting happens",
+            "mood": "bored",
+            "signals_used": ["no_signals"],
+        },
+        {
+            "action": "SELL",
+            "ticker": "DJT",
+            "quantity": 20,
+            "confidence": 0.55,
+            "thesis": "Stop loss triggered at -8%. Thesis didn't play out — social hype never materialized into sustained volume. Cut losses",
+            "mood": "disappointed",
+            "signals_used": ["stop_loss", "thesis_failed"],
+        },
+    ],
 }
 
-_GRADE_THRESHOLDS = {
-    "A": 90,
-    "B": 75,
-    "C": 60,
-    "D": 40,
+TEST_TRADES = {
+    "trader-kairos": [
+        {"ticker": "NVDA", "action": "buy", "quantity": 10, "entry_price": 128.50, "status": "closed", "exit_price": 138.78, "pnl": 102.80, "pnl_pct": 8.0, "entry_reason": "momentum_breakout", "exit_reason": "profit_target"},
+        {"ticker": "AMD", "action": "buy", "quantity": 15, "entry_price": 156.20, "status": "open", "pnl": 0, "pnl_pct": 0},
+        {"ticker": "AVGO", "action": "buy", "quantity": 8, "entry_price": 182.40, "status": "closed", "exit_price": 175.10, "pnl": -58.40, "pnl_pct": -4.0, "entry_reason": "options_flow", "exit_reason": "stop_loss"},
+    ],
+    "trader-aldridge": [
+        {"ticker": "JPM", "action": "buy", "quantity": 5, "entry_price": 215.30, "status": "open", "pnl": 0, "pnl_pct": 0},
+        {"ticker": "KO", "action": "buy", "quantity": 20, "entry_price": 68.40, "status": "closed", "exit_price": 72.15, "pnl": 75.00, "pnl_pct": 5.48, "entry_reason": "fundamental_value", "exit_reason": "profit_target"},
+        {"ticker": "PG", "action": "buy", "quantity": 15, "entry_price": 172.80, "status": "open", "pnl": 0, "pnl_pct": 0},
+    ],
+    "trader-stonks": [
+        {"ticker": "GME", "action": "buy", "quantity": 25, "entry_price": 28.40, "status": "closed", "exit_price": 31.81, "pnl": 85.25, "pnl_pct": 12.0, "entry_reason": "social_momentum", "exit_reason": "profit_target"},
+        {"ticker": "DJT", "action": "buy", "quantity": 20, "entry_price": 42.50, "status": "closed", "exit_price": 39.10, "pnl": -68.00, "pnl_pct": -8.0, "entry_reason": "social_sentiment", "exit_reason": "stop_loss"},
+    ],
 }
 
-_DEFAULT_SCORE = 50.0  # mid-range baseline when data is sparse
 
-# Default DB DSN for Postgres (docker.klo:5433). Override with env var.
-_DEFAULT_DSN = "host=192.168.1.179 port=5433 dbname=trading user=trader"
+def inject_test_data(agent_id: str):
+    """Inject realistic test decisions and trades into the DB."""
+    db = get_db()
+    now = datetime.now(timezone.utc)
+    decisions = TEST_DECISIONS.get(agent_id, [])
+    trades = TEST_TRADES.get(agent_id, [])
 
+    if not decisions:
+        print(f"  No test data defined for {agent_id}")
+        db.close()
+        return
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Dataclasses
-# ═══════════════════════════════════════════════════════════════════════════
-
-
-@dataclass
-class Grade:
-    """Complete trade grade with per-category scores."""
-    trade_id: str
-    agent_id: str
-    ticker: str
-    action: str
-    timestamp: str = ""
-    # Per-category scores (0–100)
-    entry_timing: float = 0.0
-    exit_timing: float = 0.0
-    risk_management: float = 0.0
-    conviction: float = 0.0
-    # Composite
-    total_score: float = 0.0
-    grade_letter: str = "F"
-    # Metadata
-    details: Dict[str, str] = field(default_factory=dict)
-
-    def __post_init__(self):
-        if self.total_score == 0.0 and any(
-            getattr(self, k) > 0 for k in _CATEGORY_WEIGHTS
-        ):
-            self.total_score = self._compute_total()
-        if self.grade_letter == "F" and self.total_score > 0:
-            self.grade_letter = self._compute_letter()
-
-    def _compute_total(self) -> float:
-        return sum(
-            getattr(self, cat, 0.0) * weight
-            for cat, weight in _CATEGORY_WEIGHTS.items()
+    decision_ids = []
+    for i, dec in enumerate(decisions):
+        ts = now.strftime("%Y-%m-%dT%H:%M:%S.000000+00:00")
+        signals_json = json.dumps(dec.get("signals_used", []))
+        cur = db.execute(
+            """INSERT INTO decisions 
+               (agent_id, timestamp, action, ticker, quantity, confidence, thesis, mood, source, signals_used, tick_number)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'live', ?, ?)""",
+            (
+                agent_id,
+                ts,
+                dec["action"],
+                dec.get("ticker", ""),
+                dec["quantity"],
+                dec["confidence"],
+                dec["thesis"],
+                dec.get("mood", "neutral"),
+                signals_json,
+                i + 1,
+            ),
         )
-
-    def _compute_letter(self) -> str:
-        for letter, threshold in _GRADE_THRESHOLDS.items():
-            if self.total_score >= threshold:
-                return letter
-        return "F"
-
-    def to_dict(self) -> dict:
-        return {
-            "trade_id": self.trade_id,
-            "agent_id": self.agent_id,
-            "ticker": self.ticker,
-            "action": self.action,
-            "timestamp": self.timestamp,
-            "entry_timing": round(self.entry_timing, 1),
-            "exit_timing": round(self.exit_timing, 1),
-            "risk_management": round(self.risk_management, 1),
-            "conviction": round(self.conviction, 1),
-            "total_score": round(self.total_score, 1),
-            "grade_letter": self.grade_letter,
-            "details": self.details,
-        }
-
-    @property
-    def is_win(self) -> bool:
-        return self.total_score >= 60
-
-    @property
-    def category_scores(self) -> Dict[str, float]:
-        return {k: getattr(self, k, 0.0) for k in _CATEGORY_WEIGHTS}
-
-
-@dataclass
-class PatternInsight:
-    """A single pattern found in trade analysis."""
-    pattern_type: str              # "winning_pattern", "losing_pattern", "drift"
-    description: str
-    category: str                  # which scoring category it relates to
-    confidence: float = 0.5        # 0–1
-    affected_trades: List[str] = field(default_factory=list)
-    recommendation: str = ""
-    data_snippet: Dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> dict:
-        return {
-            "pattern_type": self.pattern_type,
-            "description": self.description,
-            "category": self.category,
-            "confidence": round(self.confidence, 2),
-            "affected_trades": self.affected_trades,
-            "recommendation": self.recommendation,
-            "data_snippet": self.data_snippet,
-        }
-
-
-@dataclass
-class ParamChange:
-    """A single parameter change proposal."""
-    param_path: str                # dotted path e.g. "risk.max_position_pct"
-    current_value: Any
-    proposed_value: Any
-    justification: str
-    confidence: float = 0.5
-    source_insight: str = ""       # which pattern drove this change
-
-    def to_dict(self) -> dict:
-        return {
-            "param_path": self.param_path,
-            "current_value": self.current_value,
-            "proposed_value": self.proposed_value,
-            "justification": self.justification,
-            "confidence": round(self.confidence, 2),
-            "source_insight": self.source_insight,
-        }
-
-
-@dataclass
-class ParamOptimization:
-    """Complete param optimization result."""
-    strategy: str
-    timestamp: str = ""
-    current_config: Dict[str, Any] = field(default_factory=dict)
-    changes: List[ParamChange] = field(default_factory=list)
-    summary: str = ""
-    db_record_ids: List[int] = field(default_factory=list)  # IDs in trading.param_history
-
-    def to_dict(self) -> dict:
-        return {
-            "strategy": self.strategy,
-            "timestamp": self.timestamp,
-            "num_changes": len(self.changes),
-            "changes": [c.to_dict() for c in self.changes],
-            "summary": self.summary,
-            "db_record_ids": self.db_record_ids,
-        }
-
-
-@dataclass
-class LearningLoopResult:
-    """Complete result of one learning loop run."""
-    agent_id: str
-    timestamp: str = ""
-    grades: List[Grade] = field(default_factory=list)
-    avg_score: float = 0.0
-    grade_trend: str = "flat"
-    insights: List[PatternInsight] = field(default_factory=list)
-    optimization: Optional[ParamOptimization] = None
-    errors: List[str] = field(default_factory=list)
-
-    def to_dict(self) -> dict:
-        return {
-            "agent_id": self.agent_id,
-            "timestamp": self.timestamp,
-            "grades": [g.to_dict() for g in self.grades],
-            "avg_score": round(self.avg_score, 1),
-            "grade_trend": self.grade_trend,
-            "insights": [i.to_dict() for i in self.insights],
-            "optimization": self.optimization.to_dict() if self.optimization else None,
-            "errors": self.errors,
-        }
-
-    def report(self) -> str:
-        lines = [
-            f"## Learning Loop — {self.agent_id}",
-            f"**{self.timestamp}**",
-            "",
-            f"### Grades ({len(self.grades)} trades)",
-            f"Average: **{self.avg_score:.0f}/100** ({self.grade_trend})",
-        ]
-        if self.grades:
-            for cat in _CATEGORY_WEIGHTS:
-                vals = [getattr(g, cat, 0) for g in self.grades]
-                avg = sum(vals) / len(vals) if vals else 0
-                icon = "✓" if avg >= 60 else "⚠️" if avg >= 40 else "❌"
-                lines.append(f"- {icon} **{cat}**: {avg:.0f}/100")
-
-        if self.insights:
-            lines.append("")
-            lines.append("### Patterns")
-            for i in self.insights[:5]:
-                lines.append(f"- [{i.pattern_type}] {i.description[:80]}")
-
-        if self.optimization and self.optimization.changes:
-            lines.append("")
-            lines.append("### Proposed Changes")
-            for c in self.optimization.changes:
-                direction = "↑" if c.proposed_value > c.current_value else "↓"
-                lines.append(f"- {direction} `{c.param_path}`: {c.current_value} → {c.proposed_value}")
-
-        if self.errors:
-            lines.append("")
-            lines.append("### Errors")
-            for e in self.errors:
-                lines.append(f"- ❌ {e}")
-
-        return "\n".join(lines)
-
-    def save_to_db(self) -> Optional[int]:
-        """Persist this loop run to the trading.param_history table.
-
-        Writes each proposed change as a separate row. Returns the ID of
-        the first record written, or None if no changes were proposed.
-        Returns -1 if DB write fails.
-        """
-        if not self.optimization or not self.optimization.changes:
-            return None
-
-        try:
-            conn = get_connection()
-            cur = conn.cursor()
-            first_id = None
-            trader_id = _agent_to_strategy(self.agent_id)
-
-            for change in self.optimization.changes:
-                cur.execute(
-                    """INSERT INTO trading.param_history
-                       (agent_id, param_name, old_value, new_value,
-                        before_score, after_score, changed_at,
-                        source, reason, trader_id, score_metric)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                       RETURNING id""",
-                    (
-                        self.agent_id,
-                        change.param_path,
-                        float(change.current_value) if change.current_value is not None else None,
-                        float(change.proposed_value) if change.proposed_value is not None else None,
-                        float(self.avg_score) if self.avg_score else None,
-                        None,  # after_score — filled later on re-evaluation
-                        datetime.now(),
-                        "learning_loop",
-                        change.justification[:500],
-                        trader_id,
-                        "calmar",
-                    ),
-                )
-                row = cur.fetchone()
-                if row is not None:
-                    record_id = row[0]
-                    if first_id is None:
-                        first_id = record_id
-                    if self.optimization.db_record_ids is not None:
-                        self.optimization.db_record_ids.append(record_id)
-
-            conn.commit()
-            cur.close()
-            conn.close()
-            log.info(
-                "Saved %d param changes to DB for %s (trader=%s)",
-                len(self.optimization.changes), self.agent_id, trader_id,
-            )
-            return first_id
-
-        except Exception as e:
-            log.error("Failed to save learning loop results to DB: %s", e)
-            try:
-                conn.rollback()
-                conn.close()
-            except Exception:
-                pass
-            return -1
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# TRADE GRADER — pure function
-# ═══════════════════════════════════════════════════════════════════════════
-
-
-def grade_trade(
-    trade: dict,
-    market_data: Optional[dict] = None,
-    timestamp: Optional[str] = None,
-) -> Grade:
-    """Grade a single trade on 4 criteria: entry, exit, risk, conviction.
-
-    Args:
-        trade: Trade dict with keys like id, agent_id, ticker, action,
-               entry_price, exit_price, quantity, stop_loss, thesis,
-               confidence, pnl, exit_reason, opened_at, closed_at, etc.
-        market_data: Optional dict with price, ma20, ma50, rsi, atr.
-        timestamp: Optional ISO timestamp for harness compatibility.
-
-    Returns:
-        Grade with per-category scores 0–100.
-    """
-    ts = timestamp or datetime.now().isoformat()
-    trade_id = str(trade.get("id", trade.get("trade_id", "unknown")))
-    agent_id = str(trade.get("agent_id", "unknown"))
-    ticker = str(trade.get("ticker", "unknown")).upper()
-    action = str(trade.get("action", "BUY")).upper()
-
-    grade = Grade(
-        trade_id=trade_id,
-        agent_id=agent_id,
-        ticker=ticker,
-        action=action,
-        timestamp=ts,
-    )
-
-    grade.entry_timing = _score_entry(trade, market_data)
-    grade.exit_timing = _score_exit(trade)
-    grade.risk_management = _score_risk(trade, market_data)
-    grade.conviction = _score_conviction(trade)
-    grade.total_score = grade._compute_total()
-    grade.grade_letter = grade._compute_letter()
-
-    return grade
-
-
-def _score_entry(trade: dict, market_data: Optional[dict]) -> float:
-    """Score entry timing 0–100."""
-    action = trade.get("action", "BUY")
-    if action == "HOLD":
-        return 80.0
-
-    score = 50.0  # baseline
-
-    thesis = str(trade.get("thesis", ""))
-    if len(thesis) > 50:
-        score += 15
-    elif len(thesis) > 20:
-        score += 8
-    elif len(thesis) > 0:
-        score += 3
-
-    confidence = trade.get("confidence")
-    if confidence is not None:
-        try:
-            conf = float(confidence)
-            if conf >= 0.75:
-                score += 12
-            elif conf >= 0.50:
-                score += 6
-        except (ValueError, TypeError):
-            pass
-
-    if market_data and action == "BUY":
-        price = market_data.get("price")
-        ma20 = market_data.get("ma20")
-        ma50 = market_data.get("ma50")
-        rsi = market_data.get("rsi")
-
-        if price and ma20 and price > ma20:
-            score += 8
-        if price and ma50 and price > ma50:
-            score += 5
-        if rsi is not None:
-            try:
-                rsi_val = float(rsi)
-                if 40 <= rsi_val <= 70:
-                    score += 7
-            except (ValueError, TypeError):
-                pass
-
-    if action == "SELL" and market_data:
-        price = market_data.get("price")
-        ma20 = market_data.get("ma20")
-        if price and ma20 and price < ma20:
-            score += 8
-
-    return max(0.0, min(100.0, score))
-
-
-def _score_exit(trade: dict) -> float:
-    """Score exit timing 0–100."""
-    action = trade.get("action", "BUY")
-    pnl = trade.get("pnl")
-    exit_reason = str(trade.get("exit_reason", ""))
-
-    if action == "HOLD":
-        return 70.0
-    if pnl is None:
-        return 50.0
-
-    score = 50.0
-    try:
-        pnl_val = float(pnl)
-    except (ValueError, TypeError):
-        return 50.0
-
-    if pnl_val > 0:
-        score += 20
-        if "target" in exit_reason.lower() or "profit" in exit_reason.lower():
-            score += 10
-        elif "trailing" in exit_reason.lower() or "stop" in exit_reason.lower():
-            score += 5
-    elif pnl_val < 0:
-        if "stop" in exit_reason.lower() or "risk" in exit_reason.lower():
-            score += 8
-        elif pnl_val > -0.05:
-            score += 3
-        else:
-            score -= 10
-
-    if len(exit_reason) > 10:
-        score += 5
-    elif len(exit_reason) > 0:
-        score += 2
-
-    return max(0.0, min(100.0, score))
-
-
-def _score_risk(trade: dict, market_data: Optional[dict]) -> float:
-    """Score risk management 0–100."""
-    action = trade.get("action", "BUY")
-    if action in ("HOLD", "SELL"):
-        return 75.0
-
-    score = 50.0
-
-    stop_loss = trade.get("stop_loss")
-    if stop_loss is not None and float(stop_loss) > 0:
-        score += 15
-    else:
-        score -= 10
-
-    quantity = trade.get("quantity", 0)
-    entry_price = trade.get("entry_price") or (market_data or {}).get("price", 100)
-    portfolio_value = trade.get("portfolio_value", 10000)
-
-    try:
-        pos_value = float(quantity) * float(entry_price)
-        pos_pct = pos_value / float(portfolio_value) if float(portfolio_value) > 0 else 0
-        if pos_pct <= 0.10:
-            score += 15
-        elif pos_pct <= 0.20:
-            score += 8
-        elif pos_pct <= 0.30:
-            score += 2
-        else:
-            score -= 10
-    except (ValueError, TypeError, ZeroDivisionError):
-        pass
-
-    max_daily_loss = trade.get("max_daily_loss")
-    if max_daily_loss is not None:
-        score += 5
-
-    return max(0.0, min(100.0, score))
-
-
-def _score_conviction(trade: dict) -> float:
-    """Score conviction/thesis-driven decision making 0–100."""
-    score = 50.0
-
-    thesis = str(trade.get("thesis", ""))
-    if len(thesis) > 80:
-        score += 20
-    elif len(thesis) > 40:
-        score += 12
-    elif len(thesis) > 10:
-        score += 5
-
-    confidence = trade.get("confidence")
-    if confidence is not None:
-        try:
-            conf = float(confidence)
-            if conf >= 0.80:
-                score += 15
-            elif conf >= 0.60:
-                score += 8
-            elif conf < 0.30:
-                score -= 10
-        except (ValueError, TypeError):
-            pass
-
-    signals = trade.get("signals_used", trade.get("signals", []))
-    if isinstance(signals, str):
-        try:
-            signals = json.loads(signals)
-        except (json.JSONDecodeError, TypeError):
-            signals = []
-    if isinstance(signals, list) and len(signals) >= 3:
-        score += 8
-    elif isinstance(signals, list) and len(signals) >= 1:
-        score += 3
-
-    return max(0.0, min(100.0, score))
-
-
-def grade_trades(
-    trades: List[dict],
-    market_data: Optional[dict] = None,
-    timestamp: Optional[str] = None,
-) -> List[Grade]:
-    """Grade a batch of trades."""
-    ts = timestamp or datetime.now().isoformat()
-    return [grade_trade(t, market_data, ts) for t in trades]
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# PATTERN ANALYZER
-# ═══════════════════════════════════════════════════════════════════════════
-
-
-def analyze_patterns(
-    trades: List[Grade],
-    timestamp: Optional[str] = None,
-) -> List[PatternInsight]:
-    """Analyze graded trades for actionable patterns.
-
-    Groups trades by scoring category, identifies winning and losing
-    patterns, and detects parameter drift.
-
-    Args:
-        trades: List of Grade objects (already graded).
-        timestamp: Optional ISO timestamp for harness compatibility.
-
-    Returns:
-        List of PatternInsight with recommendations.
-    """
-    if not trades:
-        return [
-            PatternInsight(
-                pattern_type="no_data",
-                description="No trades available for pattern analysis.",
-                category="general",
-                confidence=1.0,
-                recommendation="Collect more trade data before analyzing patterns.",
-            )
-        ]
-
-    insights: List[PatternInsight] = []
-
-    # Per-category weakness analysis
-    for cat in _CATEGORY_WEIGHTS:
-        scores = [getattr(t, cat, 0.0) for t in trades]
-        avg = sum(scores) / len(scores) if scores else 0.0
-
-        if avg < 40:
-            worst_trades = sorted(trades, key=lambda t: getattr(t, cat, 0.0))[:3]
-            insights.append(PatternInsight(
-                pattern_type="losing_pattern",
-                description=f"Category '{cat}' is critically weak (avg {avg:.0f}/100).",
-                category=cat,
-                confidence=0.9,
-                affected_trades=[t.trade_id for t in worst_trades],
-                recommendation=_remediation_for_category(cat),
-            ))
-        elif avg < 60:
-            insights.append(PatternInsight(
-                pattern_type="losing_pattern",
-                description=f"Category '{cat}' is below threshold (avg {avg:.0f}/100).",
-                category=cat,
-                confidence=0.7,
-                affected_trades=[t.trade_id for t in trades if getattr(t, cat, 0.0) < 50],
-            ))
-
-    # Winning pattern identification
-    wins = [t for t in trades if t.is_win]
-    if wins and len(wins) >= 3:
-        win_cats = {}
-        for cat in _CATEGORY_WEIGHTS:
-            win_cats[cat] = sum(getattr(t, cat, 0.0) for t in wins) / len(wins)
-        best_cat = max(win_cats, key=win_cats.get)
-        insights.append(PatternInsight(
-            pattern_type="winning_pattern",
-            description=f"Winning trades excel at '{best_cat}' (avg {win_cats[best_cat]:.0f}/100). "
-                        f"Consider doubling down on this strength.",
-            category=best_cat,
-            confidence=0.75,
-            affected_trades=[t.trade_id for t in wins[:5]],
-            recommendation=f"Maintain or strengthen {best_cat}-related behaviors.",
-            data_snippet={"win_avg_by_category": {k: round(v, 1) for k, v in win_cats.items()}},
-        ))
-
-    # Parameter drift detection
-    if len(trades) >= 4:
-        midpoint = len(trades) // 2
-        early = trades[:midpoint]
-        late = trades[midpoint:]
-        early_avg = sum(t.total_score for t in early) / len(early)
-        late_avg = sum(t.total_score for t in late) / len(late)
-
-        drift = late_avg - early_avg
-        if drift < -10:
-            cat_drifts = {}
-            for cat in _CATEGORY_WEIGHTS:
-                early_cat = sum(getattr(t, cat, 0.0) for t in early) / len(early)
-                late_cat = sum(getattr(t, cat, 0.0) for t in late) / len(late)
-                if late_cat - early_cat < -5:
-                    cat_drifts[cat] = round(late_cat - early_cat, 1)
-            if cat_drifts:
-                insights.append(PatternInsight(
-                    pattern_type="drift",
-                    description=f"Performance is degrading significantly "
-                                f"(avg score {early_avg:.0f} → {late_avg:.0f}). "
-                                f"Parameter drift detected in: {list(cat_drifts.keys())}.",
-                    category="general",
-                    confidence=0.8,
-                    affected_trades=[t.trade_id for t in late],
-                    recommendation="Review strategy configuration and consider re-optimizing parameters.",
-                    data_snippet={"drift_by_category": cat_drifts},
-                ))
-
-    # Agent-specific analysis
-    agent_ids = list(set(t.agent_id for t in trades))
-    for agent_id in agent_ids:
-        agent_trades = [t for t in trades if t.agent_id == agent_id]
-        if len(agent_trades) >= 3:
-            agent_avg = sum(t.total_score for t in agent_trades) / len(agent_trades)
-            if agent_avg < 50:
-                weaknesses = {}
-                for cat in _CATEGORY_WEIGHTS:
-                    cat_avg = sum(getattr(t, cat, 0.0) for t in agent_trades) / len(agent_trades)
-                    weaknesses[cat] = cat_avg
-                worst = min(weaknesses, key=weaknesses.get)
-                insights.append(PatternInsight(
-                    pattern_type="losing_pattern",
-                    description=f"Agent '{agent_id}' is struggling overall (avg {agent_avg:.0f}/100). "
-                                f"Biggest weakness: '{worst}' at {weaknesses[worst]:.0f}/100.",
-                    category=worst,
-                    confidence=0.85,
-                    affected_trades=[t.trade_id for t in agent_trades],
-                    recommendation=f"Focus improvement on {worst} for agent {agent_id}.",
-                    data_snippet={"agent_avg": round(agent_avg, 1)},
-                ))
-
-    return insights
-
-
-def _remediation_for_category(category: str) -> str:
-    """Return default remediation advice for a scoring category."""
-    advice = {
-        "entry_timing": "Improve entry timing: require stronger signal confirmation, "
-                        "use limit orders near support, wait for trend confirmation.",
-        "exit_timing": "Improve exit discipline: set profit targets and stop losses "
-                       "before entering. Use trailing stops to capture gains.",
-        "risk_management": "Tighten risk controls: reduce position sizes, "
-                           "always set stops, enforce daily loss limits.",
-        "conviction": "Increase conviction threshold: require deeper thesis, "
-                      "more confirming signals, and higher confidence before trading.",
-    }
-    return advice.get(category, "Review this category for improvement opportunities.")
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# PARAM OPTIMIZER
-# ═══════════════════════════════════════════════════════════════════════════
-
-
-def optimize_params(
-    strategy: str,
-    trades: List[Grade],
-    timestamp: Optional[str] = None,
-    persist_to_db: bool = True,
-) -> ParamOptimization:
-    """Analyze graded trades and propose config parameter changes.
-
-    Args:
-        strategy: Strategy name (maps to trader in DB, e.g. "kairos").
-        trades: List of graded trades to analyze.
-        timestamp: Optional ISO timestamp for harness compatibility.
-        persist_to_db: If True (default), writes the proposed changes to the
-                       trading.param_history table.
-
-    Returns:
-        ParamOptimization with proposed changes.
-    """
-    ts = timestamp or datetime.now().isoformat()
-
-    current_config = _load_config_from_db(strategy)
-
-    if not trades:
-        return ParamOptimization(
-            strategy=strategy,
-            timestamp=ts,
-            current_config=current_config,
-            summary="No trades to optimize against.",
-        )
-
-    cat_avgs: Dict[str, float] = {}
-    for cat in _CATEGORY_WEIGHTS:
-        vals = [getattr(t, cat, 0.0) for t in trades]
-        cat_avgs[cat] = sum(vals) / len(vals) if vals else 0.0
-
-    changes: List[ParamChange] = []
-
-    if cat_avgs.get("entry_timing", 100) < 50:
-        _propose_tighter_entry(changes, current_config, cat_avgs["entry_timing"])
-
-    if cat_avgs.get("exit_timing", 100) < 50:
-        _propose_tighter_exit(changes, current_config, cat_avgs["exit_timing"])
-
-    if cat_avgs.get("risk_management", 100) < 50:
-        _propose_tighter_risk(changes, current_config, cat_avgs["risk_management"])
-
-    if cat_avgs.get("conviction", 100) < 50:
-        _propose_higher_conviction(changes, current_config, cat_avgs["conviction"])
-
-    if not changes:
-        total_avg = sum(cat_avgs.values()) / len(cat_avgs)
-        if total_avg > 80:
-            changes.append(ParamChange(
-                param_path="risk.max_position_pct",
-                current_value=current_config.get("risk", {}).get("max_position_pct", 0.10),
-                proposed_value=round(
-                    current_config.get("risk", {}).get("max_position_pct", 0.10) * 1.05, 3
-                ),
-                justification="Strong performance across all categories. "
-                             "Slightly increase position size to capitalize.",
-                confidence=0.6,
-                source_insight="strong_all_categories",
-            ))
-
-    summary_lines = []
-    if changes:
-        summary_lines.append(f"Proposed {len(changes)} parameter changes:")
-        for c in changes:
-            direction = "↑" if c.proposed_value > c.current_value else "↓"
-            summary_lines.append(
-                f"  {direction} {c.param_path}: {c.current_value} → {c.proposed_value} "
-                f"({c.justification})"
-            )
-    else:
-        summary_lines.append("No parameter changes proposed. All categories are healthy.")
-
-    opt = ParamOptimization(
-        strategy=strategy,
-        timestamp=ts,
-        current_config=current_config,
-        changes=changes,
-        summary="\n".join(summary_lines),
-    )
-
-    if persist_to_db and changes:
-        opt.db_record_ids = _save_changes_to_db(strategy, changes)
-
-    return opt
-
-
-def _load_config_from_db(strategy: str) -> Dict[str, Any]:
-    """Load a trader's current config from the trading.virtual_traders table.
-
-    Args:
-        strategy: Strategy name (e.g. "kairos", "aldridge", "stonks").
-
-    Returns:
-        Dict with config keys. Falls back to defaults if DB is unavailable.
-    """
-    # Default config (mirrors what paper-trading-agents YAML would have)
-    default_config: Dict[str, Any] = {
-        "signals": {
-            "minimum_confidence": 0.65,
-            "confirmations_required": 3,
-        },
-        "exit_rules": {
-            "profit_target_pct": 0.15,
-            "max_hold_days": 7,
-        },
-        "risk": {
-            "max_position_pct": 0.10,
-            "stop_loss_pct": 0.05,
-        },
-    }
-
-    try:
-        conn = get_connection()
-        cur = conn.cursor()
-        # Look for any virtual trader whose base_trader matches strategy
-        cur.execute(
-            "SELECT config FROM trading.virtual_traders "
-            "WHERE base_trader = %s AND status = 'active' "
-            "ORDER BY name LIMIT 1",
-            (strategy,),
-        )
-        row = cur.fetchone()
-        cur.close()
-        conn.close()
-
-        if row and row[0] is not None:
-            db_config = row[0]  # JSONB → dict
-            if isinstance(db_config, dict) and db_config:
-                # Merge DB config into defaults
-                merged = dict(default_config)
-                for key, value in db_config.items():
-                    if isinstance(value, dict) and key in merged and isinstance(merged[key], dict):
-                        merged[key].update(value)
-                    else:
-                        merged[key] = value
-                log.debug("Loaded config from DB for strategy=%s", strategy)
-                return merged
-
-        log.debug("No DB config found for strategy=%s, using defaults", strategy)
-        return dict(default_config)
-
-    except Exception as e:
-        log.warning("Failed to load config from DB for strategy=%s: %s. Using defaults.", strategy, e)
-        try:
-            conn.close()
-        except Exception:
-            pass
-        return dict(default_config)
-
-
-def _save_changes_to_db(strategy: str, changes: List[ParamChange]) -> List[int]:
-    """Write proposed parameter changes to the trading.param_history table.
-
-    Args:
-        strategy: Strategy name (trader ID in DB).
-        changes: List of proposed parameter changes.
-
-    Returns:
-        List of record IDs inserted, or empty list on failure.
-    """
-    record_ids: List[int] = []
-
-    try:
-        conn = get_connection()
-        cur = conn.cursor()
-
-        for change in changes:
-            cur.execute(
-                """INSERT INTO trading.param_history
-                   (agent_id, param_name, old_value, new_value,
-                    before_score, after_score, changed_at,
-                    source, reason, trader_id, score_metric)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                   RETURNING id""",
+        decision_ids.append(cur.lastrowid)
+
+    for i, trade in enumerate(trades):
+        ts = now.strftime("%Y-%m-%dT%H:%M:%S.000000+00:00")
+        if trade["status"] == "open":
+            db.execute(
+                """INSERT INTO trades
+                   (agent_id, timestamp, decision_id, ticker, action, quantity,
+                    entry_price, entry_reason, entry_timestamp, status,
+                    pnl, pnl_pct)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 0.0, 0.0)""",
                 (
-                    f"trader-{strategy}",
-                    change.param_path,
-                    float(change.current_value) if change.current_value is not None else None,
-                    float(change.proposed_value) if change.proposed_value is not None else None,
-                    None,   # before_score — unknown at proposal time
-                    None,   # after_score — filled later on re-evaluation
-                    datetime.now(),
-                    "learning_loop",
-                    change.justification[:500],
-                    strategy,
-                    "calmar",
+                    agent_id,
+                    ts,
+                    decision_ids[i % len(decision_ids)],
+                    trade["ticker"],
+                    trade["action"],
+                    trade["quantity"],
+                    trade["entry_price"],
+                    trade.get("entry_reason", ""),
+                    ts,
                 ),
             )
-            row = cur.fetchone()
-            if row is not None:
-                record_ids.append(row[0])
+        else:
+            db.execute(
+                """INSERT INTO trades
+                   (agent_id, timestamp, decision_id, ticker, action, quantity,
+                    entry_price, entry_reason, entry_timestamp, status,
+                    exit_price, exit_timestamp, exit_reason, pnl, pnl_pct)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'closed', ?, ?, ?, ?, ?)""",
+                (
+                    agent_id,
+                    ts,
+                    decision_ids[i % len(decision_ids)],
+                    trade["ticker"],
+                    trade["action"],
+                    trade["quantity"],
+                    trade["entry_price"],
+                    trade.get("entry_reason", ""),
+                    ts,
+                    trade.get("exit_price", 0),
+                    ts,
+                    trade.get("exit_reason", ""),
+                    trade.get("pnl", 0),
+                    trade.get("pnl_pct", 0),
+                ),
+            )
 
-        conn.commit()
-        cur.close()
-        conn.close()
+    # Add journal entries
+    journal_entries = {
+        "trader-kairos": [
+            "NVDA breakout was textbook — MACD crossover on volume surge. Took profit at 8% per plan. AMD still developing.",
+            "AVGO was a mistake. Options flow looked good but the thesis was thin. Stopped out at -4%. Note: don't chase earnings drift without fundamentals.",
+            "Portfolio: 63% cash, 1 open position (AMD). Conviction moderate. Sector rotation favoring semis.",
+        ],
+        "trader-aldridge": [
+            "JPM position opened at $215.30. P/E at 5-year low provides margin of safety. Monitoring for additional entry.",
+            "KO exited at $72.15 for +5.48%. Thesis played out — defensive rotation into staples materialized as expected.",
+            "Committee notes: cash position at 72%. Considering increasing to 5 positions with some mid-cap value names per Patricia's recommendation.",
+        ],
+        "trader-stonks": [
+            "GME was a banger — +12% in 2 hours. Social sentiment peaked and I got out at the right time. WSB calls it a 'diamond hands moment' but I'm taking the money.",
+            "DJT was a L. Entry thesis was thin — Bluesky chatter isn't enough. Social momentum needs to be backed by volume. -8% hit stop loss. Lesson learned.",
+            "In cash now. Waiting for the next hype cycle. Flow is quiet across the board.",
+        ],
+    }
 
-        log.info("Saved %d param changes to trading.param_history for %s", len(record_ids), strategy)
-        return record_ids
-
-    except Exception as e:
-        log.error("Failed to save param changes to DB for %s: %s", strategy, e)
-        try:
-            conn.rollback()
-            conn.close()
-        except Exception:
-            pass
-        return []
-
-
-def _propose_tighter_entry(changes, config, current_score):
-    """Propose entry-related parameter changes."""
-    signals = config.get("signals", {})
-    curr_conf = signals.get("minimum_confidence", 0.65)
-    curr_confirms = signals.get("confirmations_required", 3)
-    new_conf = min(0.85, curr_conf + 0.05)
-    if new_conf != curr_conf:
-        changes.append(ParamChange(
-            param_path="signals.minimum_confidence",
-            current_value=curr_conf,
-            proposed_value=round(new_conf, 2),
-            justification=f"Entry timing is weak ({current_score:.0f}/100). "
-                          f"Raising minimum confidence to filter out marginal setups.",
-            confidence=0.75,
-            source_insight="weak_entry_timing",
-        ))
-    if curr_confirms < 4:
-        changes.append(ParamChange(
-            param_path="signals.confirmations_required",
-            current_value=curr_confirms,
-            proposed_value=min(5, curr_confirms + 1),
-            justification=f"Entry timing is weak ({current_score:.0f}/100). "
-                          f"Requiring more signal confirmations for entry.",
-            confidence=0.7,
-            source_insight="weak_entry_timing",
-        ))
-
-
-def _propose_tighter_exit(changes, config, current_score):
-    """Propose exit-related parameter changes."""
-    exit_rules = config.get("exit_rules", {})
-    curr_target = exit_rules.get("profit_target_pct", 0.15)
-    curr_max_hold = exit_rules.get("max_hold_days", 7)
-    new_target = max(0.05, curr_target - 0.025)
-    if new_target != curr_target:
-        changes.append(ParamChange(
-            param_path="exit_rules.profit_target_pct",
-            current_value=curr_target,
-            proposed_value=round(new_target, 3),
-            justification=f"Exit timing is weak ({current_score:.0f}/100). "
-                          f"Lowering profit target to lock in gains earlier.",
-            confidence=0.7,
-            source_insight="weak_exit_timing",
-        ))
-    new_hold = max(3, curr_max_hold - 1)
-    if new_hold != curr_max_hold:
-        changes.append(ParamChange(
-            param_path="exit_rules.max_hold_days",
-            current_value=curr_max_hold,
-            proposed_value=new_hold,
-            justification=f"Exit timing is weak ({current_score:.0f}/100). "
-                          f"Reducing max hold days to rotate capital faster.",
-            confidence=0.65,
-            source_insight="weak_exit_timing",
-        ))
-
-
-def _propose_tighter_risk(changes, config, current_score):
-    """Propose risk-related parameter changes."""
-    risk = config.get("risk", {})
-    curr_pos = risk.get("max_position_pct", 0.10)
-    curr_stop = risk.get("stop_loss_pct", 0.05)
-    new_pos = max(0.02, curr_pos - 0.02)
-    if new_pos != curr_pos:
-        changes.append(ParamChange(
-            param_path="risk.max_position_pct",
-            current_value=curr_pos,
-            proposed_value=round(new_pos, 3),
-            justification=f"Risk management is weak ({current_score:.0f}/100). "
-                          f"Reducing max position size.",
-            confidence=0.8,
-            source_insight="weak_risk_management",
-        ))
-    new_stop = max(0.02, curr_stop - 0.01)
-    if new_stop != curr_stop:
-        changes.append(ParamChange(
-            param_path="risk.stop_loss_pct",
-            current_value=curr_stop,
-            proposed_value=round(new_stop, 3),
-            justification=f"Risk management is weak ({current_score:.0f}/100). "
-                          f"Tightening stop loss to cut losses faster.",
-            confidence=0.75,
-            source_insight="weak_risk_management",
-        ))
-
-
-def _propose_higher_conviction(changes, config, current_score):
-    """Propose conviction-related parameter changes."""
-    signals = config.get("signals", {})
-    curr_confidence = signals.get("minimum_confidence", 0.65)
-    new_confidence = min(0.90, curr_confidence + 0.10)
-    if new_confidence != curr_confidence:
-        changes.append(ParamChange(
-            param_path="signals.minimum_confidence",
-            current_value=curr_confidence,
-            proposed_value=round(new_confidence, 2),
-            justification=f"Conviction is weak ({current_score:.0f}/100). "
-                          f"Raising minimum confidence threshold significantly.",
-            confidence=0.8,
-            source_insight="weak_conviction",
-        ))
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# LEARNING LOOP ORCHESTRATOR
-# ═══════════════════════════════════════════════════════════════════════════
-
-
-def run_loop(
-    agent_id: str,
-    since_date: Optional[str] = None,
-    trades: Optional[List[dict]] = None,
-    market_data: Optional[dict] = None,
-    timestamp: Optional[str] = None,
-    skip_optimization: bool = False,
-    persist_to_db: bool = True,
-) -> LearningLoopResult:
-    """Run the full learning loop: fetch → grade → analyze → optimize.
-
-    This is the main entry point. It orchestrates all four components in
-    sequence, producing a complete LearningLoopResult.
-
-    Args:
-        agent_id: Agent identifier (e.g. "trader-kairos").
-        since_date: Optional ISO date to filter trades (inclusive).
-        trades: Optional pre-fetched trade list.
-        market_data: Optional market data for grading context.
-        timestamp: Optional ISO timestamp for harness compatibility.
-        skip_optimization: If True, skip the param optimization step.
-        persist_to_db: If True (default), persists optimization proposals to
-                       the trading.param_history table.
-
-    Returns:
-        LearningLoopResult with grades, insights, and optimization.
-    """
-    ts = timestamp or datetime.now().isoformat()
-    errors: List[str] = []
-
-    if trades is None:
-        trades = []
-        errors.append("No trades provided. Pass a list of trade dicts or use a fetcher.")
-    elif len(trades) == 0:
-        errors.append("Empty trades list provided — nothing to analyze.")
-
-    if since_date and trades:
-        try:
-            since_dt = datetime.fromisoformat(since_date)
-            trades = [
-                t for t in trades
-                if _trade_timestamp(t) and datetime.fromisoformat(_trade_timestamp(t)) >= since_dt
-            ]
-        except (ValueError, TypeError):
-            errors.append(f"Invalid since_date format: {since_date}")
-
-    grades = grade_trades(trades, market_data, ts)
-
-    avg_score = sum(g.total_score for g in grades) / len(grades) if grades else 0.0
-    grade_trend = _compute_trend(grades)
-
-    insights = analyze_patterns(grades, ts)
-
-    optimization = None
-    if not skip_optimization and trades:
-        strategy = _agent_to_strategy(agent_id)
-        optimization = optimize_params(
-            strategy=strategy,
-            trades=grades,
-            timestamp=ts,
-            persist_to_db=persist_to_db,
+    entries = journal_entries.get(agent_id, [])
+    for entry in entries:
+        ts = now.strftime("%Y-%m-%dT%H:%M:%S.000000+00:00")
+        db.execute(
+            "INSERT INTO journal (agent_id, timestamp, mood, entry, source) VALUES (?, ?, 'reflective', ?, 'md')",
+            (agent_id, ts, entry),
         )
 
-    result = LearningLoopResult(
-        agent_id=agent_id,
-        timestamp=ts,
-        grades=grades,
-        avg_score=avg_score,
-        grade_trend=grade_trend,
-        insights=insights,
-        optimization=optimization,
-        errors=errors,
-    )
+    db.commit()
+    db.close()
 
+    n_dec = len(decisions)
+    n_trd = len(trades)
+    n_jnl = len(entries)
+    print(f"  Injected {n_dec} decisions, {n_trd} trades, {n_jnl} journal entries for {agent_id}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Learning loop core
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def run_for_agent(agent_id: str) -> Dict[str, Any]:
+    """Full learning loop for one agent: grade → analyze → synthesize."""
+    print(f"\n{'='*60}")
+    print(f"📊 Learning Loop — {agent_id}")
+    print(f"{'='*60}")
+
+    decisions = get_decisions(agent_id)
+    trades = get_trades(agent_id)
+    journal = get_journal(agent_id)
+
+    print(f"  Decisions: {len(decisions)}")
+    print(f"  Trades:    {len(trades)}")
+    print(f"  Journal:   {len(journal)}")
+
+    # Step 1: Journal analysis
+    print(f"\n  🔍 Journal Analysis...")
+    if journal:
+        insights = analyze_journal(journal, [], trades)
+        if isinstance(insights, list):
+            for ins in insights:
+                if isinstance(ins, JournalInsight):
+                    print(f"    • [{ins.category}] {ins.description[:120]}...")
+                else:
+                    print(f"    • {str(ins)[:120]}")
+        elif isinstance(insights, dict):
+            for k, v in insights.items():
+                print(f"    • {k}: {str(v)[:120]}")
+        else:
+            print(f"    • {str(insights)[:120]}")
+    else:
+        print(f"    No journal entries found")
+
+    # Step 2: Decision analysis
+    print(f"\n  📈 Decision Analysis...")
+    if decisions:
+        buys = sum(1 for d in decisions if d["action"] == "BUY")
+        sells = sum(1 for d in decisions if d["action"] == "SELL")
+        holds = sum(1 for d in decisions if d["action"] == "HOLD")
+        avg_conf = sum(d["confidence"] or 0 for d in decisions) / len(decisions) if decisions else 0
+        print(f"    BUY: {buys}  SELL: {sells}  HOLD: {holds}")
+        print(f"    Avg confidence: {avg_conf:.2f}")
+
+        # Find patterns
+        high_conviction = [d for d in decisions if d["confidence"] and d["confidence"] >= 0.7]
+        low_conviction = [d for d in decisions if d["confidence"] and d["confidence"] < 0.5]
+        if high_conviction:
+            print(f"    High-conviction trades: {len(high_conviction)}")
+            for d in high_conviction[:3]:
+                signals = json.loads(d.get("signals_used", "[]")) if isinstance(d.get("signals_used"), str) else d.get("signals_used", [])
+                print(f"      • {d['action']} {d['ticker']} (conf:{d['confidence']:.2f}) — {', '.join(signals[:3])}")
+        if low_conviction:
+            print(f"    Low-conviction trades: {len(low_conviction)}")
+
+        # Check for regime weakness patterns
+        losing_signals = {}
+        for d in decisions:
+            if d["confidence"] and d["confidence"] < 0.5:
+                signals = json.loads(d.get("signals_used", "[]")) if isinstance(d.get("signals_used"), str) else d.get("signals_used", [])
+                for s in signals:
+                    losing_signals[s] = losing_signals.get(s, 0) + 1
+        if losing_signals:
+            worst_signals = sorted(losing_signals.items(), key=lambda x: x[1], reverse=True)[:3]
+            print(f"    Worst-performing signal categories:")
+            for signal, count in worst_signals:
+                print(f"      • {signal}: appeared in {count} low-conviction decisions")
+
+    # Step 3: Trade P&L analysis
+    print(f"\n  💰 P&L Analysis...")
+    if trades:
+        total_pnl = sum(t.get("pnl", 0) or 0 for t in trades)
+        wins = [t for t in trades if (t.get("pnl", 0) or 0) > 0]
+        losses = [t for t in trades if (t.get("pnl", 0) or 0) < 0]
+        win_rate = len(wins) / len(trades) * 100 if trades else 0
+        best = max(trades, key=lambda t: t.get("pnl", 0) or 0) if trades else {}
+        worst = min(trades, key=lambda t: t.get("pnl", 0) or 0) if trades else {}
+        print(f"    Total P&L: ${total_pnl:.2f}")
+        print(f"    Win rate:  {win_rate:.1f}% ({len(wins)}W / {len(losses)}L)")
+        print(f"    Best:      {best.get('ticker','?')} ${best.get('pnl',0):.2f}")
+        print(f"    Worst:     {worst.get('ticker','?')} ${worst.get('pnl',0):.2f}")
+    else:
+        print(f"    No trades found")
+
+    # Step 4: Synthesis
+    print(f"\n  🧬 Synthesis...")
+    try:
+        insights_for_synth = insights if isinstance(insights, list) else []
+        trader_insights_dict = {agent_id: [i for i in insights_for_synth if isinstance(i, JournalInsight)]}
+        scenarios_dict = {agent_id: {'decisions': decisions, 'trades': trades}}
+        synth = synthesize_nightly(trader_insights_dict, scenarios_dict) if insights_for_synth else None
+        if synth:
+            promos = getattr(synth, 'promotions', getattr(synth, 'promoted_insights', []))
+            if promos:
+                print(f"    Promotions: {len(promos)}")
+                for p in promos[:3]:
+                    print(f"      • {p}")
+            else:
+                print(f"    Synthesis: no promotions")
+        else:
+            print(f"    No synthesis results")
+    except Exception as e:
+        print(f"    Synthesis: {e}")
+
+    # Step 5: Learning signals
+    print(f"\n  📝 Learning Signals...")
+    signals = []
+
+    if trades:
+        if win_rate < 40:
+            signals.append("⚠️  LOW WIN RATE — Review entry criteria. Consider tightening signal filters.")
+        elif win_rate > 60:
+            signals.append("✅ GOOD WIN RATE — Current strategy generating positive results.")
+
+    if high_conviction:
+        hv_buys = [d for d in high_conviction if d["action"] == "BUY"]
+        hv_profit = sum(
+            1 for d in high_conviction
+            if any(
+                t.get("pnl", 0) or 0 > 0
+                for t in trades
+                if t.get("ticker") == d.get("ticker")
+            )
+        )
+        if hv_buys and hv_profit < len(hv_buys) * 0.5:
+            signals.append("⚠️  HIGH CONVICTION ≠ HIGH ACCURACY — Confidence calibration needs adjustment.")
+
+    # Market-specific signals
+    if decisions:
+        recent = decisions[:3]
+        hold_only = all(d["action"] == "HOLD" for d in recent)
+        if hold_only:
+            signals.append("ℹ️  CONSISTENT HOLD — Agent is cautious. Check if this is risk management or paralysis.")
+
+    if not signals:
+        signals.append("✅ No critical issues detected. Baseline performance within acceptable range.")
+
+    for sig in signals:
+        print(f"    {sig}")
+
+    result = {
+        "agent_id": agent_id,
+        "decisions_count": len(decisions),
+        "trades_count": len(trades),
+        "journal_count": len(journal),
+        "win_rate": win_rate if trades else 0,
+        "total_pnl": sum(t.get("pnl", 0) or 0 for t in trades),
+        "signals": signals,
+        "status": "ok",
+    }
     return result
 
 
-def _trade_timestamp(trade: dict) -> str:
-    """Extract a timestamp from a trade dict for filtering."""
-    return str(
-        trade.get("opened_at") or trade.get("timestamp") or trade.get("closed_at") or ""
-    )
-
-
-def _agent_to_strategy(agent_id: str) -> str:
-    """Map agent_id to strategy name."""
-    mapping = {
-        "trader-kairos": "kairos",
-        "trader-aldridge": "aldridge",
-        "trader-stonks": "stonks",
-    }
-    return mapping.get(agent_id, agent_id.replace("trader-", ""))
-
-
-def _compute_trend(grades: List[Grade]) -> str:
-    """Compute grade trend from chronologically ordered grades."""
-    if len(grades) < 3:
-        return "flat"
-    mid = len(grades) // 2
-    early = sum(g.total_score for g in grades[:mid]) / mid
-    late = sum(g.total_score for g in grades[mid:]) / (len(grades) - mid)
-    diff = late - early
-    if diff > 5:
-        return "improving"
-    elif diff < -5:
-        return "declining"
-    return "flat"
-
-
-# ═══════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════
 # CLI
-# ═══════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def health_check():
+    """Check system health — DB connections, schema, profiles."""
+    print(f"{'='*60}")
+    print(f"🏥 Health Check")
+    print(f"{'='*60}")
+
+    # DB check
+    try:
+        db = get_db()
+        db.execute("SELECT 1")
+        db.close()
+        print(f"  ✅ Database: {DB_PATH}")
+    except Exception as e:
+        print(f"  ❌ Database: {e}")
+        return
+
+    # Agent profiles
+    agents = get_agents()
+    print(f"  ✅ Agent profiles: {len(agents)} — {', '.join(agents)}")
+
+    # Schema
+    db = get_db()
+    cur = db.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+    tables = [r["name"] for r in cur.fetchall()]
+    print(f"  ✅ Tables: {len(tables)}")
+    for t in tables:
+        cur = db.execute(f'SELECT COUNT(*) FROM "{t}"')
+        c = cur.fetchone()[0]
+        print(f"      {t}: {c} rows")
+    db.close()
+
+    # Check existing imports
+    print(f"\n  📦 Module check:")
+    for mod in ["journal_analyzer", "synthesis", "simulator"]:
+        try:
+            __import__(f"src.{mod}")
+            print(f"    ✅ src.{mod}")
+        except Exception as e:
+            print(f"    ❌ src.{mod}: {e}")
 
 
 def main():
-    import argparse
-
-    parser = argparse.ArgumentParser(
-        description="Unified Learning Loop — grade, analyze, optimize, and loop."
-    )
-    sub = parser.add_subparsers(dest="cmd")
-
-    grade_p = sub.add_parser("grade", help="Grade a single trade")
-    grade_p.add_argument("--trade-id", default="test-1")
-    grade_p.add_argument("--agent", default="trader-kairos")
-    grade_p.add_argument("--ticker", default="AAPL")
-    grade_p.add_argument("--action", default="BUY")
-    grade_p.add_argument("--thesis", default="Strong momentum buy")
-    grade_p.add_argument("--confidence", type=float, default=0.75)
-    grade_p.add_argument("--pnl", type=float, default=0.0)
-    grade_p.add_argument("--stop-loss", type=float, default=None)
-    grade_p.add_argument("--json", action="store_true")
-
-    analyze_p = sub.add_parser("analyze", help="Analyze pattern from JSON")
-    analyze_p.add_argument("input_file", help="JSON file with list of graded trades")
-
-    opt_p = sub.add_parser("optimize", help="Optimize params for a strategy")
-    opt_p.add_argument("strategy", help="Strategy name (kairos, aldridge, stonks)")
-    opt_p.add_argument("input_file", help="JSON file with list of graded trades")
-    opt_p.add_argument("--no-db", action="store_true", help="Don't persist to DB")
-
-    loop_p = sub.add_parser("loop", help="Run full learning loop")
-    loop_p.add_argument("--agent", default="trader-kairos")
-    loop_p.add_argument("--trades-json", help="JSON file with trades list")
-    loop_p.add_argument("--since", help="ISO date filter")
-    loop_p.add_argument("--json", action="store_true")
-    loop_p.add_argument("--no-db", action="store_true", help="Don't persist to DB")
+    parser = argparse.ArgumentParser(description="Learning Loop — grade → analyze → synthesize")
+    parser.add_argument("--agent", help="Single agent id (e.g. trader-kairos)")
+    parser.add_argument("--all", action="store_true", help="Run for all agents")
+    parser.add_argument("--inject-test-data", action="store_true", help="Inject test decisions/trades before running")
+    parser.add_argument("--health", action="store_true", help="System health check")
 
     args = parser.parse_args()
 
-    if args.cmd == "grade":
-        trade = {
-            "id": args.trade_id,
-            "agent_id": args.agent,
-            "ticker": args.ticker,
-            "action": args.action,
-            "thesis": args.thesis,
-            "confidence": args.confidence,
-            "pnl": args.pnl,
-            "stop_loss": args.stop_loss,
-        }
-        g = grade_trade(trade)
-        if args.json:
-            print(json.dumps(g.to_dict(), indent=2))
-        else:
-            print(f"Trade: {g.ticker} {g.action} — {g.total_score:.0f}/100 ({g.grade_letter})")
-            for cat in _CATEGORY_WEIGHTS:
-                print(f"  {cat}: {getattr(g, cat, 0.0):.0f}/100")
+    start = time.time()
 
-    elif args.cmd == "analyze":
-        with open(args.input_file) as f:
-            data = json.load(f)
-        grades = [
-            Grade(**{k: v for k, v in item.items() if k in Grade.__dataclass_fields__})
-            if isinstance(item, dict) else item
-            for item in data
-        ] if isinstance(data, list) else []
-        if grades and isinstance(grades[0], dict):
-            grades = [Grade(**{k: v for k, v in g.items() if k in Grade.__dataclass_fields__})
-                      for g in grades]
-        insights = analyze_patterns(grades)
-        for i in insights:
-            print(f"[{i.pattern_type}] {i.description} (confidence: {i.confidence:.0%})")
-            if i.recommendation:
-                print(f"  → {i.recommendation}")
+    if args.health:
+        health_check()
+        return
 
-    elif args.cmd == "optimize":
-        with open(args.input_file) as f:
-            data = json.load(f)
-        grades = [Grade(**{k: v for k, v in g.items() if k in Grade.__dataclass_fields__})
-                  for g in data] if isinstance(data, list) else []
-        opt = optimize_params(args.strategy, grades, persist_to_db=not args.no_db)
-        print(opt.summary)
-        if opt.db_record_ids:
-            print(f"\nPersisted to DB: record IDs {opt.db_record_ids}")
-
-    elif args.cmd == "loop":
-        trades = []
-        if args.trades_json:
-            with open(args.trades_json) as f:
-                trades = json.load(f)
-        result = run_loop(
-            agent_id=args.agent,
-            since_date=args.since,
-            trades=trades,
-            persist_to_db=not args.no_db,
-        )
-        if args.json:
-            print(json.dumps(result.to_dict(), indent=2))
-        else:
-            print(result.report())
-
+    # Determine agents
+    if args.agent:
+        agents = [args.agent]
+    elif args.all:
+        agents = get_agents()
     else:
-        parser.print_help()
+        # Default: all agents
+        agents = get_agents()
 
-    return 0
+    if not agents:
+        print("No agents found. Run with --health to check database state.")
+        return
+
+    # Optionally inject test data
+    if args.inject_test_data:
+        print("Injecting test data...")
+        for agent in agents:
+            inject_test_data(agent)
+        print()
+
+    # Run learning loop for each agent
+    results = []
+    for agent in agents:
+        try:
+            result = run_for_agent(agent)
+            results.append(result)
+        except Exception as e:
+            print(f"\n  ❌ Error for {agent}: {e}")
+            import traceback
+            traceback.print_exc()
+
+    # Summary
+    elapsed = time.time() - start
+    print(f"\n{'='*60}")
+    print(f"✅ Learning loop complete ({elapsed:.1f}s)")
+    for r in results:
+        print(f"  {r['agent_id']}: {r['trades_count']} trades, ${r['total_pnl']:.2f} P&L, "
+              f"{r['win_rate']:.0f}% win rate — {len(r['signals'])} learning signals")
+    print()
 
 
 if __name__ == "__main__":
-    import sys
-    sys.exit(main())
+    main()
