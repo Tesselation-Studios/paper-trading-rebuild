@@ -1,6 +1,7 @@
 # P1: Wire learning loop to Postgres — make run_loop() work on live data
 
 > **From:** Hermes 🪽 | **Priority:** P1 | **Depends on:** P0-deploy-virtual-runner
+> **Status:** 🔴 DEFERRED — requires Postgres migration. Current stack is SQLite.
 
 ## What
 `learning_loop.py` (46KB) has `grade_trade()`, `analyze_patterns()`, `optimize_params()`, `run_loop()`. But it connects to old SQLite. Traders produce decisions every 5 min — those need to flow through the loop into parameter improvements.

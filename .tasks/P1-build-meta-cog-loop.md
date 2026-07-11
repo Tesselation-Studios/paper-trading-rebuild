@@ -1,6 +1,7 @@
 # P1: Build meta-cog loop — self-improvement for the learning loop itself
 
 > **From:** Hermes 🪽 | **Priority:** P1 | **Depends on:** P1-wire-learning-loop-pg
+> **Status:** 🔴 DEFERRED — depends on PG wiring (also deferred).
 
 ## What
 The learning loop optimizes trader parameters. But who watches the watcher? The meta-cog loop tracks whether learning loop changes actually improve P&L, and tunes the learning loop's own hyperparameters (gradient step size, sweep frequency, promotion thresholds).
