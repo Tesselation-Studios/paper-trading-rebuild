@@ -43,10 +43,16 @@ _DB_CANDIDATES = [
 
 
 def _first_existing(paths: List[Path]) -> Path:
-    """Return the first path that exists, falling back to the first one."""
+    """Return the first path that exists, falling back to the first one.
+
+    Gracefully handles PermissionError on broken symlinks or inaccessible dirs.
+    """
     for p in paths:
-        if p.is_dir() or p.exists():
-            return p
+        try:
+            if p.is_dir() or p.exists():
+                return p
+        except PermissionError:
+            continue
     # Return first candidate even if it doesn't exist yet
     return paths[0]
 
