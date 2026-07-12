@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "paper-trading-teams"
+version = "0.1.0"
+description = "Paper trading teams — multi-agent trading simulation"
+requires-python = ">=3.10"
+dependencies = [
+    "yfinance>=0.2.0",
+    "pandas>=2.0",
+    "numpy>=1.24",
+]
+
+[project.scripts]
+historical_sim = "historical_sim:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

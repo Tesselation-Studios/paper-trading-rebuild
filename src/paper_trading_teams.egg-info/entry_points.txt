@@ -1,0 +1,2 @@
+[console_scripts]
+historical_sim = historical_sim:main

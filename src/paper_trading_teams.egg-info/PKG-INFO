@@ -1,0 +1,8 @@
+Metadata-Version: 2.4
+Name: paper-trading-teams
+Version: 0.1.0
+Summary: Paper trading teams — multi-agent trading simulation
+Requires-Python: >=3.10
+Requires-Dist: yfinance>=0.2.0
+Requires-Dist: pandas>=2.0
+Requires-Dist: numpy>=1.24

@@ -1,0 +1,7 @@
+pyproject.toml
+src/paper_trading_teams.egg-info/PKG-INFO
+src/paper_trading_teams.egg-info/SOURCES.txt
+src/paper_trading_teams.egg-info/dependency_links.txt
+src/paper_trading_teams.egg-info/entry_points.txt
+src/paper_trading_teams.egg-info/requires.txt
+src/paper_trading_teams.egg-info/top_level.txt
