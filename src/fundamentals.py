@@ -180,6 +180,7 @@ def store_fundamentals(
                    ON CONFLICT (ticker, fetched_at) DO NOTHING""",
                 fundamentals.to_dict(),
             )
+        conn.commit()
         return True
     except Exception as e:
         log.error("Failed to store fundamentals for %s: %s", fundamentals.ticker, e)
