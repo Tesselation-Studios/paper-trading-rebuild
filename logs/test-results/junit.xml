@@ -1,1 +1,166 @@
-<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="0" skipped="0" tests="13" time="5.712" timestamp="2026-07-12T17:56:46.254111-04:00" hostname="openclaw"><testcase classname="paper-trading.tests.test_fundamentals.TestSafeFloat" name="test_none" time="0.007" /><testcase classname="paper-trading.tests.test_fundamentals.TestSafeFloat" name="test_valid_float" time="0.001" /><testcase classname="paper-trading.tests.test_fundamentals.TestSafeFloat" name="test_nan" time="0.001" /><testcase classname="paper-trading.tests.test_fundamentals.TestSafeFloat" name="test_invalid" time="0.001" /><testcase classname="paper-trading.tests.test_fundamentals.TestFetchFundamentals" name="test_returns_fundamentals_dataclass" time="1.984" /><testcase classname="paper-trading.tests.test_fundamentals.TestFetchFundamentals" name="test_returns_real_data_for_aapl" time="1.078" /><testcase classname="paper-trading.tests.test_fundamentals.TestFetchFundamentals" name="test_handles_unknown_ticker" time="0.991" /><testcase classname="paper-trading.tests.test_fundamentals.TestStoreAndLoad" name="test_store_and_load_roundtrip" time="0.344" /><testcase classname="paper-trading.tests.test_fundamentals.TestScreeningIntegration" name="test_aapl_passes_screen" time="1.185" /><testcase classname="paper-trading.tests.test_fundamentals.TestScreeningIntegration" name="test_negative_earnings_rejected" time="0.002" /><testcase classname="paper-trading.tests.test_fundamentals.TestScreeningIntegration" name="test_high_de_rejected" time="0.002" /><testcase classname="paper-trading.tests.test_fundamentals.TestScreeningIntegration" name="test_negative_pe_rejected" time="0.002" /><testcase classname="paper-trading.tests.test_fundamentals.TestScreeningIntegration" name="test_no_dividend_rejected" time="0.002" /></testsuite></testsuites>
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="14" skipped="0" tests="53" time="29.703" timestamp="2026-07-12T18:07:12.263706-04:00" hostname="openclaw"><testcase classname="paper-trading.tests.test_data_bus_smoke.TestHealth" name="test_status_ok" time="0.013" /><testcase classname="paper-trading.tests.test_data_bus_smoke.TestHealth" name="test_has_schedulers" time="0.006" /><testcase classname="paper-trading.tests.test_data_bus_smoke.TestHealth" name="test_scheduler_schema" time="0.005" /><testcase classname="paper-trading.tests.test_data_bus_smoke.TestHealth" name="test_cache_stats" time="0.005" /><testcase classname="paper-trading.tests.test_data_bus_smoke.TestHealth" name="test_uptime_positive" time="0.007" /><testcase classname="paper-trading.tests.test_data_bus_smoke.TestHealth" name="test_tracked_symbols" time="0.005" /><testcase classname="paper-trading.tests.test_data_bus_smoke.TestQuotes" name="test_status_200" time="0.130" /><testcase classname="paper-trading.tests.test_data_bus_smoke.TestQuotes" name="test_returns_all_symbols" time="0.007" /><testcase classname="paper-trading.tests.test_data_bus_smoke.TestQuotes" name="test_required_fields" time="0.006"><failure message="AssertionError: AAPL: missing price&#10;assert 'price' in {'cached_at': '2026-07-12T18:07:12.772486', 'close': 315.32, 'high': 316.765, 'low': 314.78, ...}">tests/test_data_bus_smoke.py:109: in test_required_fields
+    assert "price" in q, f"{sym}: missing price"
+E   AssertionError: AAPL: missing price
+E   assert 'price' in {'cached_at': '2026-07-12T18:07:12.772486', 'close': 315.32, 'high': 316.765, 'low': 314.78, ...}</failure></testcase><testcase classname="paper-trading.tests.test_data_bus_smoke.TestQuotes" name="test_meta_fields" time="0.006" /><testcase classname="paper-trading.tests.test_data_bus_smoke.TestQuotes" name="test_price_is_positive" time="0.008"><failure message="KeyError: 'price'">tests/test_data_bus_smoke.py:127: in test_price_is_positive
+    assert q["price"] &gt; 0, f"{sym}: price={q['price']} not positive"
+           ^^^^^^^^^^
+E   KeyError: 'price'</failure></testcase><testcase classname="paper-trading.tests.test_data_bus_smoke.TestCrypto" name="test_status_200" time="0.127" /><testcase classname="paper-trading.tests.test_data_bus_smoke.TestCrypto" name="test_returns_symbol" time="0.005" /><testcase classname="paper-trading.tests.test_data_bus_smoke.TestCrypto" name="test_required_fields" time="0.005" /><testcase classname="paper-trading.tests.test_data_bus_smoke.TestCrypto" name="test_meta_fields" time="0.005" /><testcase classname="paper-trading.tests.test_data_bus_smoke.TestSentiment" name="test_status_200" time="3.085" /><testcase classname="paper-trading.tests.test_data_bus_smoke.TestSentiment" name="test_required_score_fields" time="0.005" /><testcase classname="paper-trading.tests.test_data_bus_smoke.TestSentiment" name="test_has_symbol_and_source" time="0.006" /><testcase classname="paper-trading.tests.test_data_bus_smoke.TestFearGreed" name="test_status_200" time="0.137" /><testcase classname="paper-trading.tests.test_data_bus_smoke.TestFearGreed" name="test_required_fields" time="0.006" /><testcase classname="paper-trading.tests.test_data_bus_smoke.TestFearGreed" name="test_classification_known_value" time="0.005" /><testcase classname="paper-trading.tests.test_data_bus_smoke.TestNews" name="test_status_200" time="0.110" /><testcase classname="paper-trading.tests.test_data_bus_smoke.TestNews" name="test_returns_headlines" time="0.006" /><testcase classname="paper-trading.tests.test_data_bus_smoke.TestNews" name="test_headline_schema" time="0.006" /><testcase classname="paper-trading.tests.test_data_bus_smoke.TestFundamentals" name="test_returns_json" time="10.013"><failure message="requests.exceptions.ReadTimeout: HTTPConnectionPool(host='localhost', port=5000): Read timed out. (read timeout=10)">../../.local/lib/python3.12/site-packages/urllib3/connectionpool.py:468: in _make_request
+    six.raise_from(e, None)
+../../.local/lib/python3.12/site-packages/urllib3/connectionpool.py:463: in _make_request
+    httplib_response = conn.getresponse()
+                       ^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.12/http/client.py:1448: in getresponse
+    response.begin()
+/usr/lib/python3.12/http/client.py:336: in begin
+    version, status, reason = self._read_status()
+                              ^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.12/http/client.py:297: in _read_status
+    line = str(self.fp.readline(_MAXLINE + 1), "iso-8859-1")
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.12/socket.py:707: in readinto
+    return self._sock.recv_into(b)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+E   TimeoutError: timed out
+
+During handling of the above exception, another exception occurred:
+/usr/lib/python3/dist-packages/requests/adapters.py:486: in send
+    resp = conn.urlopen(
+../../.local/lib/python3.12/site-packages/urllib3/connectionpool.py:802: in urlopen
+    retries = retries.increment(
+../../.local/lib/python3.12/site-packages/urllib3/util/retry.py:552: in increment
+    raise six.reraise(type(error), error, _stacktrace)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../../.local/lib/python3.12/site-packages/urllib3/packages/six.py:770: in reraise
+    raise value
+../../.local/lib/python3.12/site-packages/urllib3/connectionpool.py:716: in urlopen
+    httplib_response = self._make_request(
+../../.local/lib/python3.12/site-packages/urllib3/connectionpool.py:470: in _make_request
+    self._raise_timeout(err=e, url=url, timeout_value=read_timeout)
+../../.local/lib/python3.12/site-packages/urllib3/connectionpool.py:358: in _raise_timeout
+    raise ReadTimeoutError(
+E   urllib3.exceptions.ReadTimeoutError: HTTPConnectionPool(host='localhost', port=5000): Read timed out. (read timeout=10)
+
+During handling of the above exception, another exception occurred:
+tests/test_data_bus_smoke.py:252: in test_returns_json
+    resp = requests.get(
+/usr/lib/python3/dist-packages/requests/api.py:73: in get
+    return request("get", url, params=params, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3/dist-packages/requests/api.py:59: in request
+    return session.request(method=method, url=url, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3/dist-packages/requests/sessions.py:589: in request
+    resp = self.send(prep, **send_kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3/dist-packages/requests/sessions.py:703: in send
+    r = adapter.send(request, **kwargs)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3/dist-packages/requests/adapters.py:532: in send
+    raise ReadTimeout(e, request=request)
+E   requests.exceptions.ReadTimeout: HTTPConnectionPool(host='localhost', port=5000): Read timed out. (read timeout=10)</failure></testcase><testcase classname="paper-trading.tests.test_data_bus_smoke.TestFundamentals" name="test_error_schema_when_no_data" time="10.013"><failure message="requests.exceptions.ReadTimeout: HTTPConnectionPool(host='localhost', port=5000): Read timed out. (read timeout=10)">../../.local/lib/python3.12/site-packages/urllib3/connectionpool.py:468: in _make_request
+    six.raise_from(e, None)
+../../.local/lib/python3.12/site-packages/urllib3/connectionpool.py:463: in _make_request
+    httplib_response = conn.getresponse()
+                       ^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.12/http/client.py:1448: in getresponse
+    response.begin()
+/usr/lib/python3.12/http/client.py:336: in begin
+    version, status, reason = self._read_status()
+                              ^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.12/http/client.py:297: in _read_status
+    line = str(self.fp.readline(_MAXLINE + 1), "iso-8859-1")
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.12/socket.py:707: in readinto
+    return self._sock.recv_into(b)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+E   TimeoutError: timed out
+
+During handling of the above exception, another exception occurred:
+/usr/lib/python3/dist-packages/requests/adapters.py:486: in send
+    resp = conn.urlopen(
+../../.local/lib/python3.12/site-packages/urllib3/connectionpool.py:802: in urlopen
+    retries = retries.increment(
+../../.local/lib/python3.12/site-packages/urllib3/util/retry.py:552: in increment
+    raise six.reraise(type(error), error, _stacktrace)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../../.local/lib/python3.12/site-packages/urllib3/packages/six.py:770: in reraise
+    raise value
+../../.local/lib/python3.12/site-packages/urllib3/connectionpool.py:716: in urlopen
+    httplib_response = self._make_request(
+../../.local/lib/python3.12/site-packages/urllib3/connectionpool.py:470: in _make_request
+    self._raise_timeout(err=e, url=url, timeout_value=read_timeout)
+../../.local/lib/python3.12/site-packages/urllib3/connectionpool.py:358: in _raise_timeout
+    raise ReadTimeoutError(
+E   urllib3.exceptions.ReadTimeoutError: HTTPConnectionPool(host='localhost', port=5000): Read timed out. (read timeout=10)
+
+During handling of the above exception, another exception occurred:
+tests/test_data_bus_smoke.py:266: in test_error_schema_when_no_data
+    data = _get("/fundamentals", {"symbol": "AAPL"}, expect_status=404)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_data_bus_smoke.py:29: in _get
+    resp = requests.get(url, params=params, timeout=TIMEOUT)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3/dist-packages/requests/api.py:73: in get
+    return request("get", url, params=params, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3/dist-packages/requests/api.py:59: in request
+    return session.request(method=method, url=url, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3/dist-packages/requests/sessions.py:589: in request
+    resp = self.send(prep, **send_kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3/dist-packages/requests/sessions.py:703: in send
+    r = adapter.send(request, **kwargs)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3/dist-packages/requests/adapters.py:532: in send
+    raise ReadTimeout(e, request=request)
+E   requests.exceptions.ReadTimeout: HTTPConnectionPool(host='localhost', port=5000): Read timed out. (read timeout=10)</failure></testcase><testcase classname="paper-trading.tests.test_data_bus_smoke.TestFundamentals" name="test_params_required" time="0.006" /><testcase classname="paper-trading.tests.test_data_bus_smoke.TestSignals" name="test_status_200" time="0.005" /><testcase classname="paper-trading.tests.test_data_bus_smoke.TestSignals" name="test_signals_schema" time="0.005" /><testcase classname="paper-trading.tests.test_data_bus_smoke.TestSignals" name="test_signal_item_schema" time="0.005" /><testcase classname="paper-trading.tests.test_data_bus_smoke.TestMomentum" name="test_status_200" time="0.005"><failure message="AssertionError: Expected 200, got 503: {&quot;error&quot;:&quot;Momentum module not available: No module named 'src.skill_cross_sectional_momentum'&quot;}&#10;  &#10;assert 503 == 200&#10; +  where 503 = &lt;Response [503]&gt;.status_code">tests/test_data_bus_smoke.py:310: in test_status_200
+    _get("/momentum")
+tests/test_data_bus_smoke.py:30: in _get
+    assert resp.status_code == expect_status, (
+E   AssertionError: Expected 200, got 503: {"error":"Momentum module not available: No module named 'src.skill_cross_sectional_momentum'"}
+E     
+E   assert 503 == 200
+E    +  where 503 = &lt;Response [503]&gt;.status_code</failure></testcase><testcase classname="paper-trading.tests.test_data_bus_smoke.TestMomentum" name="test_required_fields" time="0.005"><failure message="AssertionError: Expected 200, got 503: {&quot;error&quot;:&quot;Momentum module not available: No module named 'src.skill_cross_sectional_momentum'&quot;}&#10;  &#10;assert 503 == 200&#10; +  where 503 = &lt;Response [503]&gt;.status_code">tests/test_data_bus_smoke.py:313: in test_required_fields
+    data = _get("/momentum")
+           ^^^^^^^^^^^^^^^^^
+tests/test_data_bus_smoke.py:30: in _get
+    assert resp.status_code == expect_status, (
+E   AssertionError: Expected 200, got 503: {"error":"Momentum module not available: No module named 'src.skill_cross_sectional_momentum'"}
+E     
+E   assert 503 == 200
+E    +  where 503 = &lt;Response [503]&gt;.status_code</failure></testcase><testcase classname="paper-trading.tests.test_data_bus_smoke.TestMomentum" name="test_z_score_is_float" time="0.005"><failure message="AssertionError: Expected 200, got 503: {&quot;error&quot;:&quot;Momentum module not available: No module named 'src.skill_cross_sectional_momentum'&quot;}&#10;  &#10;assert 503 == 200&#10; +  where 503 = &lt;Response [503]&gt;.status_code">tests/test_data_bus_smoke.py:326: in test_z_score_is_float
+    data = _get("/momentum")
+           ^^^^^^^^^^^^^^^^^
+tests/test_data_bus_smoke.py:30: in _get
+    assert resp.status_code == expect_status, (
+E   AssertionError: Expected 200, got 503: {"error":"Momentum module not available: No module named 'src.skill_cross_sectional_momentum'"}
+E     
+E   assert 503 == 200
+E    +  where 503 = &lt;Response [503]&gt;.status_code</failure></testcase><testcase classname="paper-trading.tests.test_data_bus_smoke.TestMomentum" name="test_top_decile_present" time="0.007"><failure message="AssertionError: Expected 200, got 503: {&quot;error&quot;:&quot;Momentum module not available: No module named 'src.skill_cross_sectional_momentum'&quot;}&#10;  &#10;assert 503 == 200&#10; +  where 503 = &lt;Response [503]&gt;.status_code">tests/test_data_bus_smoke.py:330: in test_top_decile_present
+    data = _get("/momentum")
+           ^^^^^^^^^^^^^^^^^
+tests/test_data_bus_smoke.py:30: in _get
+    assert resp.status_code == expect_status, (
+E   AssertionError: Expected 200, got 503: {"error":"Momentum module not available: No module named 'src.skill_cross_sectional_momentum'"}
+E     
+E   assert 503 == 200
+E    +  where 503 = &lt;Response [503]&gt;.status_code</failure></testcase><testcase classname="paper-trading.tests.test_data_bus_smoke.TestCongress" name="test_status_200" time="0.006" /><testcase classname="paper-trading.tests.test_data_bus_smoke.TestCongress" name="test_congress_trades_schema" time="0.005"><failure message="AssertionError: Missing cluster_buys in congress_trades&#10;assert 'cluster_buys' in []">tests/test_data_bus_smoke.py:352: in test_congress_trades_schema
+    assert field in ct, f"Missing {field} in congress_trades"
+E   AssertionError: Missing cluster_buys in congress_trades
+E   assert 'cluster_buys' in []</failure></testcase><testcase classname="paper-trading.tests.test_data_bus_smoke.TestInsiders" name="test_status_200" time="0.352" /><testcase classname="paper-trading.tests.test_data_bus_smoke.TestInsiders" name="test_insiders_envelope" time="0.005" /><testcase classname="paper-trading.tests.test_data_bus_smoke.TestFlow" name="test_status_200" time="0.246" /><testcase classname="paper-trading.tests.test_data_bus_smoke.TestFlow" name="test_returns_flows" time="0.009" /><testcase classname="paper-trading.tests.test_data_bus_smoke.TestFlow" name="test_flow_item_schema" time="0.008" /><testcase classname="paper-trading.tests.test_data_bus_smoke.TestEarnings" name="test_status_200" time="1.316" /><testcase classname="paper-trading.tests.test_data_bus_smoke.TestEarnings" name="test_earnings_envelope" time="0.005" /><testcase classname="paper-trading.tests.test_data_bus_smoke.TestMacro" name="test_status_200" time="2.511" /><testcase classname="paper-trading.tests.test_data_bus_smoke.TestMacro" name="test_fred_indicators" time="0.008"><failure message="AssertionError: assert 'fred' in {'fetched_at': '2026-07-12T18:07:41.476881', 'indicators': {'CPI': {'date': '2026-05-01', 'series_id': 'CPIAUCSL', 'va...id': 'DGS30', 'value': '5.05'}, ...}, 'yields': {'10yr': 4.54, '2yr': 4.16, '30yr': 5.05, 'curve_status': 'flat', ...}}">tests/test_data_bus_smoke.py:450: in test_fred_indicators
+    assert "fred" in data["macro"]
+E   AssertionError: assert 'fred' in {'fetched_at': '2026-07-12T18:07:41.476881', 'indicators': {'CPI': {'date': '2026-05-01', 'series_id': 'CPIAUCSL', 'va...id': 'DGS30', 'value': '5.05'}, ...}, 'yields': {'10yr': 4.54, '2yr': 4.16, '30yr': 5.05, 'curve_status': 'flat', ...}}</failure></testcase><testcase classname="paper-trading.tests.test_data_bus_smoke.TestMacro" name="test_required_indicators" time="0.007"><failure message="KeyError: 'fred'">tests/test_data_bus_smoke.py:457: in test_required_indicators
+    fred = data["macro"]["fred"]
+           ^^^^^^^^^^^^^^^^^^^^^
+E   KeyError: 'fred'</failure></testcase><testcase classname="paper-trading.tests.test_data_bus_smoke.TestMacro" name="test_indicator_schema" time="0.007"><failure message="KeyError: 'fred'">tests/test_data_bus_smoke.py:465: in test_indicator_schema
+    for series_id, indicator in data["macro"]["fred"].items():
+                                ^^^^^^^^^^^^^^^^^^^^^
+E   KeyError: 'fred'</failure></testcase><testcase classname="paper-trading.tests.test_data_bus_smoke.TestMacro" name="test_fomc_indicators" time="0.007"><failure message="KeyError: 'fred'">tests/test_data_bus_smoke.py:472: in test_fomc_indicators
+    fred = data["macro"]["fred"]
+           ^^^^^^^^^^^^^^^^^^^^^
+E   KeyError: 'fred'</failure></testcase><testcase classname="paper-trading.tests.test_data_bus_smoke.TestSourceQuality" name="test_status_200" time="0.007" /><testcase classname="paper-trading.tests.test_data_bus_smoke.TestSourceQuality" name="test_sources_schema" time="0.006" /><testcase classname="paper-trading.tests.test_data_bus_smoke.TestSourceQuality" name="test_source_item_schema" time="0.008" /><testcase classname="paper-trading.tests.test_data_bus_smoke.TestCrossEndpoint" name="test_all_endpoints_return_json" time="0.306" /><testcase classname="paper-trading.tests.test_data_bus_smoke.TestCrossEndpoint" name="test_response_timing" time="0.033"><failure message="AssertionError: /momentum: unexpected status 503&#10;assert 503 in (200, 404)&#10; +  where 503 = &lt;Response [503]&gt;.status_code">tests/test_data_bus_smoke.py:566: in test_response_timing
+    assert resp.status_code in (200, 404), (
+E   AssertionError: /momentum: unexpected status 503
+E   assert 503 in (200, 404)
+E    +  where 503 = &lt;Response [503]&gt;.status_code</failure></testcase></testsuite></testsuites>

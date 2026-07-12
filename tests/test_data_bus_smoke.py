@@ -17,7 +17,7 @@ import pytest
 import requests
 from datetime import datetime
 
-DATA_BUS = "http://docker.klo:5000"
+DATA_BUS = "http://localhost:5000"
 TIMEOUT = 10  # seconds
 
 
