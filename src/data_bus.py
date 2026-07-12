@@ -617,6 +617,9 @@ def _fetch_alpaca_crypto(symbols: List[str]) -> Dict[str, dict]:
 
 def _fetch_fundamentals(symbol: str) -> Optional[dict]:
     """Fetch fundamentals via skill_combo_fetch (Alpha Vantage)."""
+    if _combo_fetch_fundamentals is None:
+        log.debug("skill_combo_fetch fundamentals unavailable — falling back")
+        return _fetch_fundamentals_web(symbol)
     try:
         result = _combo_fetch_fundamentals([symbol])
         if isinstance(result, dict) and "error" not in result:
@@ -624,7 +627,7 @@ def _fetch_fundamentals(symbol: str) -> Optional[dict]:
         return None
     except Exception as e:
         log.warning("Fundamentals fetch failed for %s: %s", symbol, e)
-        return None
+        return _fetch_fundamentals_web(symbol)
 
 
 def _fetch_fundamentals_web(symbol: str) -> Optional[dict]:
@@ -686,6 +689,9 @@ def _fetch_congress_trades(tickers: List[str] = None) -> dict:
     """Fetch recent congress trades via skill_combo_fetch (Finnhub)."""
     if not tickers:
         tickers = list(_tracked_symbols)
+    if fetch_congressional_trading is None:
+        log.warning("skill_combo_fetch unavailable — congress trades degraded")
+        return {}
     try:
         result = fetch_congressional_trading(tickers)
         if isinstance(result, dict) and "error" not in result:
@@ -2980,6 +2986,8 @@ def ml_signal_endpoint():
     if not symbol:
         return jsonify({"error": "symbol parameter required"}), 400
 
+    if fetch_ml_signal is None:
+        return jsonify({"symbol": symbol, "error": "ML signal module unavailable (skill_combo_fetch not loaded)"}), 503
     try:
         result = fetch_ml_signal(symbol)
         return jsonify({"symbol": symbol, "ml_signal": result})
@@ -3148,7 +3156,7 @@ def tick_snapshot():
 
     # SPY regime signal — fetch live if not in cache, then cache it
     regime = _cache.get("ml:SPY")
-    if regime is None:
+    if regime is None and fetch_ml_signal is not None:
         try:
             regime = fetch_ml_signal("SPY")
             if regime:
@@ -5012,6 +5020,8 @@ if _mcp_tools_enabled():
         cached = _cache.get(cache_key, TTL["technical_scan"])
         if cached is not None:
             return {"market_regime": cached, "source": "cache"}
+        if fetch_ml_signal is None:
+            return {"market_regime": None, "error": "ML signal module unavailable (skill_combo_fetch not loaded)"}
         try:
             result = fetch_ml_signal("SPY")
             if result and "error" not in result:

@@ -34,16 +34,39 @@ class TestDataBus:
         """Check no HTTP call in src/ lacks timeout=."""
         import subprocess, os
         root = os.path.dirname(os.path.dirname(__file__))
+        # Use grep with multiline context (-A5) to catch timeout= on next lines
         result = subprocess.run(
-            ["grep", "-rPn", r'requests\.(get|post|put|delete|patch)\(', 
+            ["grep", "-rPn", "-A5", r'requests\.(get|post|put|delete|patch)\(',
              f"{root}/src/"],
             capture_output=True, text=True
         )
+        current_lines = []
         for line in result.stdout.split("\n"):
-            if line and "timeout" not in line:
-                # Allow comments and mock lines
-                if "mock" not in line.lower() and "#" not in line.split(":")[-1].strip():
-                    pytest.fail(f"HTTP call without timeout=: {line}")
+            if not line:
+                continue
+            # grep -A separator
+            if line.startswith("--"):
+                # End of this block — check context
+                block = "\n".join(current_lines)
+                if "timeout=" not in block:
+                    first = current_lines[0] if current_lines else ""
+                    if first and "mock" not in first.lower():
+                        # Extract just the path from grep output
+                        parts = first.split(":", 2)
+                        info = ":".join(parts[:2]) if len(parts) >= 2 else first
+                        pytest.fail(f"HTTP call without timeout=: {info}")
+                current_lines = []
+                continue
+            current_lines.append(line)
+        # Check last block
+        if current_lines:
+            block = "\n".join(current_lines)
+            if "timeout=" not in block:
+                first = current_lines[0] if current_lines else ""
+                if first and "mock" not in first.lower():
+                    parts = first.split(":", 2)
+                    info = ":".join(parts[:2]) if len(parts) >= 2 else first
+                    pytest.fail(f"HTTP call without timeout=: {info}")
 
     def test_BUS_005_no_except_pass(self):
         pytest.skip("Phase 2+ enforcement")
