@@ -1,11 +1,20 @@
 #!/usr/bin/env python3
-"""Seed agent profiles into trader.db so the learning loop has entities to analyze."""
+"""Seed agent profiles into Postgres (trading.agent_profile) so the learning loop
+has entities to analyze. Falls back to SQLite shared/trader.db for legacy compat."""
 
 import json
-import sqlite3
+import os
+import sys
 from pathlib import Path
 
-DB = Path(__file__).resolve().parent.parent / "shared" / "trader.db"
+import psycopg2
+import psycopg2.extras
+
+# Postgres connection
+PG_DSN = os.getenv("PG_DSN", "host=192.168.1.179 port=5433 dbname=trading user=trader")
+
+# SQLite fallback path
+SQLITE_DB = Path(__file__).resolve().parent.parent / "shared" / "trader.db"
 
 PROFILES = {
     "trader-aldridge": {
@@ -98,8 +107,72 @@ PROFILES = {
 }
 
 
-def seed():
-    db = sqlite3.connect(str(DB))
+def seed_postgres():
+    """Seed agent profiles into Postgres trading.agent_profile."""
+    try:
+        dsn = os.getenv("PG_DSN", "host=192.168.1.179 port=5433 dbname=trading user=trader")
+        conn = psycopg2.connect(dsn)
+        cur = conn.cursor()
+
+        # Ensure trading schema has the agent_profile table
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS trading.agent_profile (
+                id              BIGSERIAL PRIMARY KEY,
+                agent_id        VARCHAR(32)     NOT NULL,
+                name            VARCHAR(128),
+                company         VARCHAR(128),
+                tagline         TEXT,
+                identity        JSONB,
+                current_state   JSONB,
+                performance     JSONB,
+                strategic_focus TEXT,
+                updated_at      TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
+                created_at      TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
+                CONSTRAINT uq_agent_profile_id UNIQUE (agent_id)
+            )
+        """)
+
+        for agent_id, profile in PROFILES.items():
+            cur.execute(
+                """INSERT INTO trading.agent_profile
+                   (agent_id, name, company, tagline, identity, current_state,
+                    performance, strategic_focus, updated_at)
+                   VALUES (%s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s, NOW())
+                   ON CONFLICT (agent_id) DO UPDATE SET
+                       name = EXCLUDED.name,
+                       company = EXCLUDED.company,
+                       tagline = EXCLUDED.tagline,
+                       identity = EXCLUDED.identity,
+                       current_state = EXCLUDED.current_state,
+                       performance = EXCLUDED.performance,
+                       strategic_focus = EXCLUDED.strategic_focus,
+                       updated_at = NOW()""",
+                (
+                    agent_id,
+                    profile["name"],
+                    profile["company"],
+                    profile["tagline"],
+                    json.dumps(profile["identity"]),
+                    json.dumps(profile["current_state"]),
+                    json.dumps(profile["performance"]),
+                    json.dumps(profile["strategic_focus"]),
+                ),
+            )
+            print(f"✅ Postgres: Seeded {agent_id} — {profile['name']}")
+
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"⚠️  Postgres seed failed: {e} — falling back to SQLite")
+        return False
+
+
+def seed_sqlite():
+    """Seed agent profiles into SQLite shared/trader.db (legacy fallback)."""
+    import sqlite3
+
+    db = sqlite3.connect(str(SQLITE_DB))
     db.execute("PRAGMA journal_mode=WAL")
 
     for agent_id, profile in PROFILES.items():
@@ -119,11 +192,21 @@ def seed():
                 json.dumps(profile["strategic_focus"]),
             ),
         )
-        print(f"✅ Seeded {agent_id} — {profile['name']}")
+        print(f"✅ SQLite: Seeded {agent_id} — {profile['name']}")
 
     db.commit()
     db.close()
-    print(f"\nAgent profiles: {len(PROFILES)} seeded successfully")
+
+
+def seed():
+    """Seed all agent profiles — Postgres first, SQLite fallback."""
+    print("🌱 Seeding agent profiles...\n")
+
+    if seed_postgres():
+        print(f"\n✅ Agent profiles seeded to Postgres ({len(PROFILES)} profiles)")
+    else:
+        seed_sqlite()
+        print(f"\n✅ Agent profiles seeded to SQLite ({len(PROFILES)} profiles)")
 
 
 if __name__ == "__main__":

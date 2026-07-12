@@ -526,18 +526,67 @@ def _get_alpaca_crypto_client():
 
 
 def _fetch_alpaca_quotes(symbols: List[str]) -> Dict[str, dict]:
-    """Fetch OHLCV bars + technical indicators via skill_combo_fetch."""
+    """Fetch latest quote data for symbols.
+
+    Uses skill_combo_fetch if available, falls back to
+    direct Alpaca StockHistoricalDataClient with 5-min bars.
+    """
     if not symbols:
         return {}
 
+    # Try skill_combo_fetch first
+    if fetch_prices_indicators is not None:
+        try:
+            result = fetch_prices_indicators(list(symbols))
+            if isinstance(result, dict) and "error" not in result:
+                return {t: d for t, d in result.items() if d is not None}
+        except Exception as e:
+            log.warning("skill_combo_fetch failed: %s", e)
+
+    # Fallback: direct Alpaca historical data client
     try:
-        result = fetch_prices_indicators(list(symbols))
-        if isinstance(result, dict) and "error" not in result:
-            # Filter out None values (insufficient data)
-            return {t: d for t, d in result.items() if d is not None}
-        return {}
+        client = _get_alpaca_data_client()
+        if client is None:
+            return {}
+
+        from alpaca.data.requests import StockBarsRequest
+        from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+        from alpaca.data.enums import DataFeed
+        import pandas as pd
+
+        now = pd.Timestamp.now(tz="America/New_York")
+        start = now - pd.Timedelta(days=5)  # last 5 trading days
+
+        # Use IEX feed for free/paper tier — SIP requires paid subscription
+        request_params = StockBarsRequest(
+            symbol_or_symbols=list(symbols),
+            timeframe=TimeFrame(15, TimeFrameUnit.Minute),
+            start=start.isoformat(),
+            end=now.isoformat(),
+            feed=DataFeed.IEX,
+        )
+
+        bars = client.get_stock_bars(request_params)
+        result = {}
+
+        for sym in symbols:
+            sym_bars = bars.data.get(sym, [])
+            if not sym_bars:
+                continue
+            latest = sym_bars[-1]
+            result[sym] = {
+                "close": float(latest.close),
+                "open": float(latest.open),
+                "high": float(latest.high),
+                "low": float(latest.low),
+                "volume": latest.volume,
+                "timestamp": latest.timestamp.isoformat(),
+                "source": "alpaca_direct",
+            }
+
+        return result
     except Exception as e:
-        log.warning("Alpaca quotes fetch failed: %s", e)
+        log.warning("Alpaca quotes fallback failed: %s", e)
         return {}
 
 

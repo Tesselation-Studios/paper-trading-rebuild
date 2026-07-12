@@ -2,6 +2,9 @@
 """
 src/learning_loop.py — Unified entry point: grade → analyze → synthesize → promote.
 
+Writes ALL data to Postgres (trading.decisions, trading.trades, trading.journal,
+trading.agent_profile). No more shared/trader.db SQLite.
+
 Ties together:
   - src/journal_analyzer.py  (heuristic analysis of trader decisions)
   - src/synthesis.py          (nightly synthesis + auto-promotion)
@@ -18,17 +21,24 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
-import sqlite3
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import psycopg2
+import psycopg2.extras
+
 # ── Path setup ───────────────────────────────────────────────────────────────
 PROJECT_DIR = Path(__file__).resolve().parent.parent
-DB_PATH = PROJECT_DIR / "shared" / "trader.db"
+
+# Postgres connection
+PG_DSN = os.getenv("PG_DSN", "host=192.168.1.179 port=5433 dbname=trading user=trader")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://trader:@192.168.1.179:5433/trading")
 
 sys.path.insert(0, str(PROJECT_DIR))
 
@@ -37,70 +47,156 @@ from src.synthesis import synthesize_nightly, Synthesizer, NightlySummary
 from src.simulator import run_nightly_synthesis as sim_run_nightly_synthesis
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# DB helpers
+# DB helpers — Postgres
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def get_db() -> sqlite3.Connection:
-    db = sqlite3.connect(str(DB_PATH))
-    db.row_factory = sqlite3.Row
-    db.execute("PRAGMA journal_mode=WAL")
-    db.execute("PRAGMA foreign_keys=ON")
-    return db
+def get_db() -> psycopg2.extensions.connection:
+    """Return a sync psycopg2 Postgres connection (NOT SQLite)."""
+    dsn = os.getenv("PG_DSN", "host=192.168.1.179 port=5433 dbname=trading user=trader")
+    conn = psycopg2.connect(dsn)
+    conn.autocommit = True
+    return conn
 
 
 def get_agents() -> List[str]:
-    db = get_db()
-    cur = db.execute("SELECT agent_id FROM agent_profile ORDER BY agent_id")
-    agents = [r["agent_id"] for r in cur.fetchall()]
-    db.close()
+    """Fetch unique trader_ids from trading.agent_profile in Postgres."""
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT agent_id FROM trading.agent_profile ORDER BY agent_id")
+        agents = [r[0] for r in cur.fetchall()]
+    finally:
+        conn.close()
+    # Fallback: if no profiles exist yet, return known live traders
+    if not agents:
+        agents = ["trader-kairos", "trader-aldridge", "trader-stonks"]
     return agents
 
 
 def get_decisions(agent_id: str, limit: int = 50) -> List[Dict]:
-    db = get_db()
-    cur = db.execute(
-        """SELECT * FROM decisions
-           WHERE agent_id = ? 
-           ORDER BY timestamp DESC 
-           LIMIT ?""",
-        (agent_id, limit),
-    )
-    rows = [dict(r) for r in cur.fetchall()]
-    db.close()
-    return rows
+    """Fetch decisions from Postgres trading.decisions.
+
+    Maps Postgres columns to the legacy SQLite column naming
+    that the analysis code expects (agent_id, action, confidence, thesis, mood).
+    """
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    try:
+        cur.execute(
+            """SELECT trader_id AS agent_id,
+                      timestamp,
+                      decision AS action,
+                      ticker,
+                      conviction AS confidence,
+                      rationale AS thesis,
+                      created_at
+               FROM trading.decisions
+               WHERE trader_id = %s
+               ORDER BY timestamp DESC
+               LIMIT %s""",
+            (agent_id, limit),
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+        # Enhance with mood, source, signals_used fields that Postgres may not have
+        # (they come from the agent's LLM output, stored as rationale)
+        for row in rows:
+            row.setdefault("mood", "analytical")
+            row.setdefault("source", "live")
+            row.setdefault("signals_used", json.dumps([]))
+            # Parse quantity from rationale or default to 0
+            row.setdefault("quantity", 0)
+            # tick_number
+            row.setdefault("tick_number", 0)
+        return rows
+    finally:
+        conn.close()
 
 
 def get_trades(agent_id: str, limit: int = 50) -> List[Dict]:
-    db = get_db()
-    cur = db.execute(
-        """SELECT * FROM trades
-           WHERE agent_id = ?
-           ORDER BY timestamp DESC
-           LIMIT ?""",
-        (agent_id, limit),
-    )
-    rows = [dict(r) for r in cur.fetchall()]
-    db.close()
-    return rows
+    """Fetch trades from Postgres trading.trades (or trading.executed_trades).
+
+    Maps Postgres columns to the legacy SQLite naming (agent_id, entry_price,
+    entry_timestamp, pnl, pnl_pct, status).
+    """
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    try:
+        # Try trading.trades first (post-migration schema)
+        cur.execute(
+            """SELECT trader_id AS agent_id,
+                      ticker,
+                      entry_price,
+                      entry_time AS entry_timestamp,
+                      exit_price,
+                      exit_time AS exit_timestamp,
+                      shares AS quantity,
+                      pnl,
+                      return_pct AS pnl_pct,
+                      entry_time AS timestamp,
+                      CASE WHEN exit_time IS NULL THEN 'open' ELSE 'closed' END AS status
+               FROM trading.trades
+               WHERE trader_id = %s AND pnl IS NOT NULL
+               ORDER BY entry_time DESC
+               LIMIT %s""",
+            (agent_id, limit),
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+
+        if not rows:
+            # Fallback to trading.executed_trades (older schema)
+            cur.execute(
+                """SELECT agent_id,
+                          ticker,
+                          action,
+                          quantity,
+                          entry_price,
+                          exit_price,
+                          entry_time AS entry_timestamp,
+                          exit_time AS exit_timestamp,
+                          pnl,
+                          pnl_pct,
+                          entry_reason,
+                          exit_reason,
+                          status,
+                          entry_time AS timestamp
+                   FROM trading.executed_trades
+                   WHERE agent_id = %s
+                   ORDER BY entry_time DESC
+                   LIMIT %s""",
+                (agent_id, limit),
+            )
+            rows = [dict(r) for r in cur.fetchall()]
+
+        return rows
+    finally:
+        conn.close()
 
 
 def get_journal(agent_id: str, limit: int = 50) -> List[str]:
-    db = get_db()
-    cur = db.execute(
-        """SELECT entry FROM journal
-           WHERE agent_id = ?
-           ORDER BY timestamp DESC
-           LIMIT ?""",
-        (agent_id, limit),
-    )
-    entries = [r["entry"] for r in cur.fetchall()]
-    db.close()
-    return entries
+    """Fetch journal entries from Postgres trading.journal.
+
+    Returns the rationale (entry text) as a flat list, matching
+    the legacy get_journal() contract.
+    """
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    try:
+        cur.execute(
+            """SELECT rationale, timestamp
+               FROM trading.journal
+               WHERE trader_id = %s
+               ORDER BY timestamp DESC
+               LIMIT %s""",
+            (agent_id, limit),
+        )
+        return [dict(r)["rationale"] for r in cur.fetchall() if dict(r).get("rationale")]
+    finally:
+        conn.close()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Test data injection
+# Test data injection — now writes to Postgres
 # ═══════════════════════════════════════════════════════════════════════════════
 
 TEST_DECISIONS = {
@@ -266,83 +362,77 @@ TEST_TRADES = {
 
 
 def inject_test_data(agent_id: str):
-    """Inject realistic test decisions and trades into the DB."""
-    db = get_db()
+    """Inject realistic test decisions and trades into Postgres."""
+    conn = get_db()
+    cur = conn.cursor()
     now = datetime.now(timezone.utc)
     decisions = TEST_DECISIONS.get(agent_id, [])
     trades = TEST_TRADES.get(agent_id, [])
 
     if not decisions:
         print(f"  No test data defined for {agent_id}")
-        db.close()
+        conn.close()
         return
 
     decision_ids = []
     for i, dec in enumerate(decisions):
-        ts = now.strftime("%Y-%m-%dT%H:%M:%S.000000+00:00")
+        ts = now
         signals_json = json.dumps(dec.get("signals_used", []))
-        cur = db.execute(
-            """INSERT INTO decisions 
-               (agent_id, timestamp, action, ticker, quantity, confidence, thesis, mood, source, signals_used, tick_number)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'live', ?, ?)""",
-            (
-                agent_id,
-                ts,
-                dec["action"],
-                dec.get("ticker", ""),
-                dec["quantity"],
-                dec["confidence"],
-                dec["thesis"],
-                dec.get("mood", "neutral"),
-                signals_json,
-                i + 1,
-            ),
+        action = dec["action"]
+        ticker = dec.get("ticker", "")
+        conviction = float(dec.get("confidence", 0.5))
+        rationale = dec.get("thesis", "")
+        cur.execute(
+            """INSERT INTO trading.decisions
+               (trader_id, ticker, timestamp, decision, conviction, rationale, created_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s)
+               RETURNING id""",
+            (agent_id, ticker, ts, action, conviction, rationale, ts),
         )
-        decision_ids.append(cur.lastrowid)
+        decision_ids.append(cur.fetchone()[0])
 
     for i, trade in enumerate(trades):
-        ts = now.strftime("%Y-%m-%dT%H:%M:%S.000000+00:00")
+        ts = now
+        trade_id = f"test-{uuid.uuid4().hex[:12]}"
+        action = trade.get("action", "buy")
         if trade["status"] == "open":
-            db.execute(
-                """INSERT INTO trades
-                   (agent_id, timestamp, decision_id, ticker, action, quantity,
-                    entry_price, entry_reason, entry_timestamp, status,
-                    pnl, pnl_pct)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 0.0, 0.0)""",
+            cur.execute(
+                """INSERT INTO trading.trades
+                   (trader_id, trade_id, ticker, entry_time, entry_price, shares,
+                    pnl, return_pct, created_at)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                 (
                     agent_id,
-                    ts,
-                    decision_ids[i % len(decision_ids)],
+                    trade_id,
                     trade["ticker"],
-                    trade["action"],
-                    trade["quantity"],
+                    ts,
                     trade["entry_price"],
-                    trade.get("entry_reason", ""),
+                    trade["quantity"],
+                    0.0,
+                    0.0,
                     ts,
                 ),
             )
         else:
-            db.execute(
-                """INSERT INTO trades
-                   (agent_id, timestamp, decision_id, ticker, action, quantity,
-                    entry_price, entry_reason, entry_timestamp, status,
-                    exit_price, exit_timestamp, exit_reason, pnl, pnl_pct)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'closed', ?, ?, ?, ?, ?)""",
+            pnl = trade.get("pnl", 0)
+            pnl_pct = trade.get("pnl_pct", 0)
+            cur.execute(
+                """INSERT INTO trading.trades
+                   (trader_id, trade_id, ticker, entry_time, exit_time,
+                    entry_price, exit_price, shares, pnl, return_pct, created_at)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                 (
                     agent_id,
-                    ts,
-                    decision_ids[i % len(decision_ids)],
+                    trade_id,
                     trade["ticker"],
-                    trade["action"],
-                    trade["quantity"],
+                    ts,
+                    ts,
                     trade["entry_price"],
-                    trade.get("entry_reason", ""),
-                    ts,
                     trade.get("exit_price", 0),
+                    trade["quantity"],
+                    pnl,
+                    pnl_pct,
                     ts,
-                    trade.get("exit_reason", ""),
-                    trade.get("pnl", 0),
-                    trade.get("pnl_pct", 0),
                 ),
             )
 
@@ -367,19 +457,21 @@ def inject_test_data(agent_id: str):
 
     entries = journal_entries.get(agent_id, [])
     for entry in entries:
-        ts = now.strftime("%Y-%m-%dT%H:%M:%S.000000+00:00")
-        db.execute(
-            "INSERT INTO journal (agent_id, timestamp, mood, entry, source) VALUES (?, ?, 'reflective', ?, 'md')",
-            (agent_id, ts, entry),
+        ts = now
+        cur.execute(
+            """INSERT INTO trading.journal
+               (trader_id, timestamp, ticker, decision, rationale, equity, drawdown_pct, created_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+            (agent_id, ts, "", "REFLECTION", entry, 0.0, 0.0, ts),
         )
 
-    db.commit()
-    db.close()
+    conn.commit()
+    conn.close()
 
     n_dec = len(decisions)
     n_trd = len(trades)
     n_jnl = len(entries)
-    print(f"  Injected {n_dec} decisions, {n_trd} trades, {n_jnl} journal entries for {agent_id}")
+    print(f"  Injected {n_dec} decisions, {n_trd} trades, {n_jnl} journal entries for {agent_id} into Postgres")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -425,17 +517,18 @@ def run_for_agent(agent_id: str) -> Dict[str, Any]:
         buys = sum(1 for d in decisions if d["action"] == "BUY")
         sells = sum(1 for d in decisions if d["action"] == "SELL")
         holds = sum(1 for d in decisions if d["action"] == "HOLD")
-        avg_conf = sum(d["confidence"] or 0 for d in decisions) / len(decisions) if decisions else 0
+        avg_conf = sum(d.get("confidence") or 0 for d in decisions) / len(decisions) if decisions else 0
         print(f"    BUY: {buys}  SELL: {sells}  HOLD: {holds}")
         print(f"    Avg confidence: {avg_conf:.2f}")
 
         # Find patterns
-        high_conviction = [d for d in decisions if d["confidence"] and d["confidence"] >= 0.7]
-        low_conviction = [d for d in decisions if d["confidence"] and d["confidence"] < 0.5]
+        high_conviction = [d for d in decisions if d.get("confidence") and d["confidence"] >= 0.7]
+        low_conviction = [d for d in decisions if d.get("confidence") and d["confidence"] < 0.5]
         if high_conviction:
             print(f"    High-conviction trades: {len(high_conviction)}")
             for d in high_conviction[:3]:
-                signals = json.loads(d.get("signals_used", "[]")) if isinstance(d.get("signals_used"), str) else d.get("signals_used", [])
+                signals_raw = d.get("signals_used", "[]")
+                signals = json.loads(signals_raw) if isinstance(signals_raw, str) else (signals_raw or [])
                 print(f"      • {d['action']} {d['ticker']} (conf:{d['confidence']:.2f}) — {', '.join(signals[:3])}")
         if low_conviction:
             print(f"    Low-conviction trades: {len(low_conviction)}")
@@ -443,8 +536,9 @@ def run_for_agent(agent_id: str) -> Dict[str, Any]:
         # Check for regime weakness patterns
         losing_signals = {}
         for d in decisions:
-            if d["confidence"] and d["confidence"] < 0.5:
-                signals = json.loads(d.get("signals_used", "[]")) if isinstance(d.get("signals_used"), str) else d.get("signals_used", [])
+            if d.get("confidence") and d["confidence"] < 0.5:
+                signals_raw = d.get("signals_used", "[]")
+                signals = json.loads(signals_raw) if isinstance(signals_raw, str) else (signals_raw or [])
                 for s in signals:
                     losing_signals[s] = losing_signals.get(s, 0) + 1
         if losing_signals:
@@ -544,35 +638,45 @@ def run_for_agent(agent_id: str) -> Dict[str, Any]:
 
 
 def health_check():
-    """Check system health — DB connections, schema, profiles."""
+    """Check system health — Postgres connections, schema, profiles."""
     print(f"{'='*60}")
-    print(f"🏥 Health Check")
+    print(f"🏥 Health Check (Postgres)")
     print(f"{'='*60}")
 
     # DB check
     try:
-        db = get_db()
-        db.execute("SELECT 1")
-        db.close()
-        print(f"  ✅ Database: {DB_PATH}")
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT 1")
+        conn.close()
+        print(f"  ✅ Postgres: connected")
     except Exception as e:
-        print(f"  ❌ Database: {e}")
+        print(f"  ❌ Postgres: {e}")
         return
 
     # Agent profiles
     agents = get_agents()
     print(f"  ✅ Agent profiles: {len(agents)} — {', '.join(agents)}")
 
-    # Schema
-    db = get_db()
-    cur = db.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
-    tables = [r["name"] for r in cur.fetchall()]
-    print(f"  ✅ Tables: {len(tables)}")
-    for t in tables:
-        cur = db.execute(f'SELECT COUNT(*) FROM "{t}"')
-        c = cur.fetchone()[0]
-        print(f"      {t}: {c} rows")
-    db.close()
+    # Schema — check Postgres schemas
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT table_schema, table_name, pg_size_pretty(pg_total_relation_size(quote_ident(table_schema) || '.' || quote_ident(table_name))) as size,
+                   (SELECT reltuples::bigint FROM pg_class WHERE oid = (quote_ident(table_schema) || '.' || quote_ident(table_name))::regclass) as rows_est
+            FROM information_schema.tables
+            WHERE table_schema IN ('market_data', 'trading')
+            ORDER BY table_schema, table_name
+        """)
+        tables = cur.fetchall()
+        print(f"  ✅ Tables: {len(tables)}")
+        for schema, name, size, rows in tables:
+            print(f"      {schema}.{name}: ~{rows or 0} rows ({size})")
+    except Exception as e:
+        print(f"  ⚠️  Schema check: {e}")
+    finally:
+        conn.close()
 
     # Check existing imports
     print(f"\n  📦 Module check:")

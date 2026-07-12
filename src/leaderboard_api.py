@@ -471,10 +471,19 @@ def _get_trade_stats(company: str) -> dict:
             for r in rows:
                 action_lower = r["action"].lower()
                 result[action_lower] = r["cnt"]
-            result["total_trades"] = result.get("buy", 0) + result.get("sell", 0)
+            # Total trades count from trades table (agent-level production data)
+            total_row = conn.execute(
+                """SELECT count(*) as cnt FROM trades
+                   WHERE trader_id = %s AND pnl IS NOT NULL""",
+                (f"trader-{company}",),
+            ).fetchone()
+            result["total_trades"] = total_row["cnt"] if total_row else 0
 
-            # Win/loss: compute directly from closed trades with PnL
-            # trades table uses trader_id (not agent_id)
+            # Also keep order counts
+            result["buys"] = result.get("buy", 0)
+            result["sells"] = result.get("sell", 0)
+
+            # Win/loss: compute directly from trades with PnL (agent-level production data)
             pnl_rows = conn.execute(
                 """SELECT pnl FROM trades
                    WHERE trader_id = %s AND pnl IS NOT NULL""",

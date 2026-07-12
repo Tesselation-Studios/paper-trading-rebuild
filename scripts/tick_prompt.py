@@ -6,6 +6,8 @@ Reads the prompt template, hits the data bus for live state, templates
 everything into a single prompt, and outputs it to stdout for the cron
 to use as the agentTurn message.
 
+Now reads journal entries from Postgres (trading.journal) instead of SQLite.
+
 Usage:
     python3 scripts/tick_prompt.py --trader kairos
     python3 scripts/tick_prompt.py --trader stonks --db-path shared/trader.db
@@ -19,17 +21,22 @@ Architecture:
 import argparse
 import json
 import os
-import sqlite3
 import sys
 import time
 import urllib.request
 from pathlib import Path
+
+import psycopg2
+import psycopg2.extras
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
 DATA_BUS_URL = os.getenv("DATA_BUS_URL", "http://localhost:5000")
 REPO_DIR = Path(__file__).resolve().parent.parent
 PROMPTS_DIR = REPO_DIR / "prompts"
+
+# Postgres connection for journal reads
+PG_DSN = os.getenv("PG_DSN", "host=192.168.1.179 port=5433 dbname=trading user=trader")
 
 # Default stock universe per trader (kept in sync with prompts/*.txt)
 STOCK_UNIVERSES = {
@@ -53,7 +60,7 @@ def fetch_tick_snapshot() -> dict:
 
 def fetch_quotes_live(symbols: list[str]) -> dict:
     """Fetch live quotes for symbols that may not be tracked."""
-    url = f"{DATA_BUS_URL}/quotes?symbols={",".join(symbols)}"
+    url = f"{DATA_BUS_URL}/quotes?symbols={','.join(symbols)}"
     try:
         with urllib.request.urlopen(url, timeout=15) as resp:
             data = json.loads(resp.read().decode())
@@ -94,22 +101,36 @@ def fetch_sentiment(symbol: str) -> dict:
         return {}
 
 
-# ── Journal ──────────────────────────────────────────────────────────────────
+# ── Journal (Postgres) ─────────────────────────────────────────────────────
 
-def get_journal_entries(db_path: str, trader_id: str, n: int = 5) -> list[str]:
-    """Pull the last N journal entries for a trader."""
+def get_journal_entries(db_path: str | None, trader_id: str, n: int = 5) -> list[str]:
+    """Pull the last N journal entries for a trader from Postgres trading.journal.
+
+    Args:
+        db_path: Ignored — kept for backward compat with CLI. All reads go to Postgres.
+        trader_id: e.g. 'kairos' → lookup 'trader-kairos' in Postgres.
+
+    Returns:
+        List of journal entry dicts with 'content' and 'created_at' keys.
+    """
+    agent_id = f"trader-{trader_id}" if not trader_id.startswith("trader-") else trader_id
+    dsn = os.getenv("PG_DSN", "host=192.168.1.179 port=5433 dbname=trading user=trader")
     try:
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            "SELECT entry as content, timestamp as created_at FROM journal "
-            "WHERE agent_id = ? ORDER BY timestamp DESC LIMIT ?",
-            (f"trader-{trader_id}", n),
-        ).fetchall()
+        conn = psycopg2.connect(dsn)
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            """SELECT rationale AS content, timestamp AS created_at
+               FROM trading.journal
+               WHERE trader_id = %s
+               ORDER BY timestamp DESC
+               LIMIT %s""",
+            (agent_id, n),
+        )
+        rows = [dict(r) for r in cur.fetchall()]
         conn.close()
-        return [dict(r) for r in reversed(rows)]
+        return list(reversed(rows))
     except Exception as e:
-        print(f"WARNING: journal fetch failed: {e}", file=sys.stderr)
+        print(f"WARNING: Postgres journal fetch failed: {e}", file=sys.stderr)
         return []
 
 
@@ -150,7 +171,6 @@ def build_market_context(snapshot: dict) -> str:
     parts = []
 
     # Fear & Greed
-    # Fear & Greed — snapshot may miss it, use fallback
     fg = snapshot.get("fear_greed") or fetch_fear_greed()
     if fg:
         fg_val = fg.get("value", "?")
@@ -230,7 +250,6 @@ def check_circuit_breaker(trader_id: str) -> dict | None:
     """
     agent_id = f"trader-{trader_id}"
     try:
-        # Ensure repo root is on path for src imports
         _repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         if _repo_root not in sys.path:
             sys.path.insert(0, _repo_root)
@@ -288,14 +307,12 @@ def assemble_prompt(trader_id: str, db_path: str | None = None) -> str:
     performance = build_performance_section(snapshot, trader_id)
     signals_board = build_signals_board(snapshot)
 
-    # 4. Journal entries
-    if db_path:
-        journal = get_journal_entries(db_path, trader_id)
-        journal_text = "\n\n".join(
-            f"[{j['created_at']}] {j['content']}" for j in journal
-        ) if journal else "No recent journal entries."
-    else:
-        journal_text = "Journal unavailable."
+    # 4. Journal entries — now reads from Postgres trading.journal
+    #    db_path is ignored; Postgres DSN is used.
+    journal = get_journal_entries(db_path, trader_id)
+    journal_text = "\n\n".join(
+        f"[{j['created_at']}] {j['content']}" for j in journal
+    ) if journal else "No recent journal entries."
 
     # 5. Assemble the full prompt
     injected = f"""
@@ -342,7 +359,7 @@ def assemble_prompt(trader_id: str, db_path: str | None = None) -> str:
 4. You have NO tools. All context is pre-assembled above. Output JSON only.
 
 REMEMBER: thesis MUST be 20+ chars, signals_used MUST have at least 1 entry,
-confidence ≥ 0.3. A HOLD with idle cash is a missed learning opportunity.
+confidence >= 0.3. A HOLD with idle cash is a missed learning opportunity.
 """.strip()
 
     return injected
@@ -363,7 +380,8 @@ def main():
         "--db-path",
         default=os.path.join(os.path.dirname(__file__), "..",
                              "shared", "trader.db"),
-        help="Path to SQLite trader database (for journal entries)"
+        help="Ignored — journal now reads from Postgres trading.journal. "
+             "Kept for backward CLI compat."
     )
     parser.add_argument(
         "--json", action="store_true",
@@ -371,17 +389,12 @@ def main():
     )
     args = parser.parse_args()
 
-    db_path = args.db_path if os.path.exists(args.db_path) else None
-    if not db_path:
-        print(f"WARNING: DB not found at {args.db_path}, journal unavailable", file=sys.stderr)
-
-    prompt = assemble_prompt(args.trader, db_path)
+    prompt = assemble_prompt(args.trader)
 
     # Check if tick was skipped by circuit breaker
     try:
         parsed = json.loads(prompt)
         if isinstance(parsed, dict) and parsed.get("tick_skipped"):
-            # Tick skipped — output skip info and exit clean
             if args.json:
                 print(json.dumps(parsed))
             else:
