@@ -1,0 +1,63 @@
+{
+    "agent": {
+        "id": "virtual-trader-momentum",
+        "name": "Virtual Momentum — Pulse Capital",
+        "enabled": false,
+        "model": {
+            "primary": "openrouter/deepseek/deepseek-v4-flash",
+            "fallbacks": [
+                "openrouter/deepseek/deepseek-v4-pro",
+                "openrouter/deepseek/deepseek-v3.2",
+                "openrouter/anthropic/claude-sonnet-4-6",
+                "openrouter/auto"
+            ]
+        },
+        "workspace": "/home/openclaw/.openclaw/workspace-vt-momentum",
+        "system_prompt": {
+            "template": "IDENTITY.md",
+            "base_trader": "kairos",
+            "persona": "momentum"
+        },
+        "tools": {
+            "profile": "restricted",
+            "allow": [
+                "web_fetch",
+                "exec"
+            ]
+        },
+        "skills": [
+            "trade-execution",
+            "market-data",
+            "virtual-trader-momentum-strategy"
+        ],
+        "heartbeat": {
+            "every": "5m",
+            "timeoutSeconds": 900,
+            "lightContext": true,
+            "activeHours": {
+                "start": "09:30",
+                "end": "16:00",
+                "timezone": "America/New_York"
+            },
+            "skipWhenBusy": false
+        },
+        "thinkingDefault": "off",
+        "fastModeDefault": true
+    },
+    "persona_config": {
+        "momentum_threshold_buy": 0.4,
+        "momentum_threshold_sell": -0.3,
+        "rsi_overbought": 80,
+        "rsi_oversold": 30,
+        "max_positions": 5,
+        "max_portfolio_pct": 0.20,
+        "min_conviction": 0.4,
+        "volume_multiplier": 1.2,
+        "stop_loss_pct": 0.03
+    },
+    "routing": {
+        "dispatcher": "orchestrator",
+        "group": "virtual-traders",
+        "priority": 10
+    }
+}

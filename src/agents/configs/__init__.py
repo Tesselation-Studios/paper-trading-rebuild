@@ -1,0 +1,1 @@
+"""Virtual trader agent config files — OpenClaw-compatible JSON definitions."""

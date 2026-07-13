@@ -1,0 +1,38 @@
+name: Stonks Aggressive
+base_trader: stonks
+variant_type: aggressive
+description: Social sentiment maximalist — low threshold, big positions, high volume
+
+model:
+  primary: openrouter/deepseek/deepseek-v4-flash
+
+risk:
+  max_position_pct: 0.12
+  max_exposure_pct: 0.70
+  stop_loss_pct: 0.07
+  max_daily_loss: 500
+  cash_reserve: 1000
+  min_shares_per_position: 1
+  max_positions: 6
+
+signals:
+  momentum_weight: 0.20
+  sentiment_weight: 0.60
+  regime_weight: 0.20
+  minimum_confidence: 0.20
+  confirmations_required: 1
+
+social_sentiment:
+  volume_spike_threshold: 2.0
+  sentiment_positive_threshold: 0.50
+  min_mention_spike: 3.0
+  unusual_options_volume: true
+
+exit_rules:
+  profit_target_pct: 0.15
+  max_hold_days: 3
+  stale_days: 2
+
+evaluation:
+  eval_window_days: 3
+  objective_metric: win_rate

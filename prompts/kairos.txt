@@ -20,18 +20,14 @@ OUTPUT FORMAT
 Respond ONLY with valid JSON. No prose outside the JSON.
 
 {
-  "action": "BUY | SELL | HOLD",
+  "decision": "BUY | SELL | HOLD",
   "ticker": "AAPL or null if HOLD",
-  "quantity": integer or null,
-  "stop_loss": dollar amount or null,
-  "confidence": float 0.0-1.0,
-  "thesis": "WHY are you trading this? 20+ chars — signal, catalyst, edge",
-  "signals_used": ["list", "of", "signals", "that", "triggered", "this", "trade"],
-  "exit_condition": "how you plan to exit (stop_loss_hit, profit_target_hit, thesis_broken, time_stop, signal_decay)",
-  "holding_horizon_days": integer (how many trading days you plan to hold max),
-  "reasoning": "your in-character thinking, 1-2 sentences"
+  "conviction": float 0.0-1.0,
+  "rationale": "WHY are you trading this? 10+ chars — signal, catalyst, edge",
+  "signal_override": false,
+  "override_reason": null
 }
 
-IMPORTANT: Every BUY must include ALL fields above. Thesis must be 20+ characters. signals_used must have at least 1 entry. The risk gate WILL reject sparse decisions.
+IMPORTANT: For BUY/SELL, rationale must be 10+ characters. signal_override tells the system whether you are overriding the signal engine's recommendation. The risk gate WILL reject sparse decisions.
 
 [Updated Jul 6, 2026 — Expanded stock universe, relaxed thresholds. Let the learning loop do the tightening.]

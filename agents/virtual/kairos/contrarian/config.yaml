@@ -1,0 +1,47 @@
+name: Kairos Contrarian
+base_trader: kairos
+variant_type: contrarian
+description: Mean-reversion strategy — buy weakness, sell strength
+
+model:
+  primary: openrouter/deepseek/deepseek-v4-flash
+
+risk:
+  max_position_pct: 0.08
+  max_exposure_pct: 0.50
+  stop_loss_pct: 0.04
+  max_daily_loss: 300
+  cash_reserve: 2000
+  min_shares_per_position: 1
+  max_positions: 4
+
+signals:
+  momentum_weight: 0.20
+  sentiment_weight: 0.50
+  regime_weight: 0.30
+  minimum_confidence: 0.35
+  confirmations_required: 2
+
+mean_reversion:
+  rsi_oversold: 40
+  rsi_overbought: 70
+  volume_spike_threshold: 1.5
+  bollinger_std: 2.0
+
+hmm_regime:
+  sustainable:
+    entry: full
+  choppy:
+    entry: half
+  exhausted:
+    entry: full
+    note: "Exhausted regimes are prime for mean-reversion entries"
+
+exit_rules:
+  profit_target_pct: 0.10
+  max_hold_days: 5
+  stale_days: 3
+
+evaluation:
+  eval_window_days: 5
+  objective_metric: win_rate

@@ -1,0 +1,42 @@
+name: Kairos Conservative
+base_trader: kairos
+variant_type: conservative
+description: High conviction threshold, small positions, strict entry filters
+
+model:
+  primary: openrouter/deepseek/deepseek-v4-flash
+
+risk:
+  max_position_pct: 0.05
+  max_exposure_pct: 0.30
+  stop_loss_pct: 0.03
+  max_daily_loss: 200
+  cash_reserve: 2500
+  min_shares_per_position: 1
+  max_positions: 2
+
+signals:
+  momentum_weight: 0.45
+  sentiment_weight: 0.25
+  regime_weight: 0.30
+  minimum_confidence: 0.75
+  confirmations_required: 3
+
+hmm_regime:
+  sustainable:
+    entry: full
+    confidence_threshold: 0.85
+    half_size_threshold: 0.65
+  choppy:
+    entry: blocked
+  exhausted:
+    entry: blocked
+
+exit_rules:
+  profit_target_pct: 0.15
+  max_hold_days: 5
+  stale_days: 3
+
+evaluation:
+  eval_window_days: 5
+  objective_metric: sharpe_ratio

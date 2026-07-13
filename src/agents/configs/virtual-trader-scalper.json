@@ -1,0 +1,72 @@
+{
+    "agent": {
+        "id": "virtual-trader-scalper",
+        "name": "Virtual Scalper — Volta Trading",
+        "enabled": false,
+        "model": {
+            "primary": "openrouter/deepseek/deepseek-v4-flash",
+            "fallbacks": [
+                "openrouter/deepseek/deepseek-v4-pro",
+                "openrouter/deepseek/deepseek-v3.2",
+                "openrouter/anthropic/claude-sonnet-4-6",
+                "openrouter/auto"
+            ]
+        },
+        "workspace": "/home/openclaw/.openclaw/workspace-vt-scalper",
+        "system_prompt": {
+            "template": "IDENTITY.md",
+            "persona": "mean_reversion_scalper"
+        },
+        "tools": {
+            "profile": "restricted",
+            "allow": [
+                "web_fetch",
+                "exec"
+            ]
+        },
+        "skills": [
+            "trade-execution",
+            "market-data",
+            "virtual-trader-scalper-strategy"
+        ],
+        "heartbeat": {
+            "every": "5m",
+            "timeoutSeconds": 900,
+            "lightContext": true,
+            "activeHours": {
+                "start": "09:30",
+                "end": "16:00",
+                "timezone": "America/New_York"
+            },
+            "skipWhenBusy": false
+        },
+        "thinkingDefault": "off",
+        "fastModeDefault": true
+    },
+    "persona_config": {
+        "max_positions": 3,
+        "max_portfolio_pct": 0.03,
+        "min_conviction": 0.4,
+        "rsi_oversold": 35,
+        "rsi_overbought": 65,
+        "rsi_oversold_deep": 30,
+        "rsi_overbought_deep": 70,
+        "target_pct": 0.015,
+        "stop_loss_pct": 0.015,
+        "max_holding_ticks": 3,
+        "consecutive_loss_limit": 3,
+        "cool_down_ticks": 10,
+        "min_atr_pct": 0.005,
+        "regime_allowed": ["bull", "bull_noisy", "sideways_rising", "sideways_falling"],
+        "pairs": [
+            ["AAPL", "MSFT"],
+            ["GOOGL", "META"],
+            ["XOM", "CVX"]
+        ]
+    },
+    "routing": {
+        "dispatcher": "orchestrator",
+        "group": "virtual-traders",
+        "priority": 10
+    }
+}

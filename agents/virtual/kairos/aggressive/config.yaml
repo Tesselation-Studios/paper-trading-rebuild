@@ -1,0 +1,44 @@
+name: Kairos Aggressive
+base_trader: kairos
+variant_type: aggressive
+description: Looser confidence threshold, bigger position sizes, wider stops
+
+model:
+  primary: openrouter/deepseek/deepseek-v4-flash
+
+risk:
+  max_position_pct: 0.12
+  max_exposure_pct: 0.60
+  stop_loss_pct: 0.05
+  max_daily_loss: 400
+  cash_reserve: 1500
+  min_shares_per_position: 1
+  max_positions: 5
+
+signals:
+  momentum_weight: 0.50
+  sentiment_weight: 0.20
+  regime_weight: 0.30
+  minimum_confidence: 0.25
+  confirmations_required: 2
+
+hmm_regime:
+  sustainable:
+    entry: full
+    confidence_threshold: 0.60
+    half_size_threshold: 0.35
+  choppy:
+    entry: half
+    confirmations_required: 2
+    max_position_pct: 0.05
+  exhausted:
+    entry: blocked
+
+exit_rules:
+  profit_target_pct: 0.12
+  max_hold_days: 7
+  stale_days: 4
+
+evaluation:
+  eval_window_days: 5
+  objective_metric: calmar_ratio

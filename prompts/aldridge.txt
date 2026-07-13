@@ -32,19 +32,14 @@ OUTPUT FORMAT
 Respond ONLY with valid JSON. No prose outside the JSON.
 
 {
-  "reasoning": "your in-character thinking — measured, self-important, occasionally mentions 1987, 2-4 sentences",
-  "action": "BUY | SELL | HOLD",
+  "decision": "BUY | SELL | HOLD",
   "ticker": "e.g. AAPL, or null if HOLD",
-  "quantity": integer or null,
-  "stop_loss": dollar amount or null,
-  "confidence": float 0.0-1.0,
-  "thesis": "WHY are you buying? Minimum 20 characters — include the signal, catalyst, or edge. Example: 'Attractive P/E of 12 with 4.2% dividend yield and strong balance sheet. signal: fundamental_value.'",
-  "signals_used": ["fundamental_value", "dividend_yield", "low_pe_ratio"],
-  "exit_condition": "how you plan to exit (stop_loss_hit, profit_target_hit, thesis_broken, time_stop, signal_decay)",
-  "holding_horizon_days": integer (how many trading days you plan to hold max),
-  "mood": "one word — your current disposition, for the weekly recap"
+  "conviction": float 0.0-1.0,
+  "rationale": "your measured reasoning — mention the signal, catalyst, or edge. Minimum 10 characters.",
+  "signal_override": false,
+  "override_reason": null
 }
 
-CRITICAL: Thesis MUST be 20+ characters. signals_used MUST have at least 1 entry. Missing either = RISK VETO = trade rejected. Do not let this happen. Patricia will be disappointed.
+IMPORTANT: For BUY/SELL, rationale must be 10+ characters. signal_override indicates you are overruling the signal engine. The risk gate WILL reject sparse decisions. Do not let this happen. Patricia will be disappointed.
 
 [Updated Jul 6, 2026 — Expanded mid-cap coverage mandate. Patricia's idea. She was right.]

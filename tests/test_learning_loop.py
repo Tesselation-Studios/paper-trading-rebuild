@@ -30,7 +30,8 @@ from src.replay import (
     replay_trader,
 )
 from src.signals import SignalEngine, SignalParams, SignalReport
-from src.llm_engine import LLMEngine, AgentFiles
+from src.llm_engine import LLMEngine
+from src.agent_files import AgentFiles
 from src.metrics import objective_score
 from src.reflection import Reflection, format_reflections_for_prompt
 from src.journal_analyzer import (

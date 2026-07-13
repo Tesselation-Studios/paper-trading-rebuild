@@ -11,3 +11,7 @@ logs/
 reports/
 venv/
 .tasks/orchestrator_state.json
+shared/trader.db-shm
+shared/trader.db-wal
+shared/cache/
+state/

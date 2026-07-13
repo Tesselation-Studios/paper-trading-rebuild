@@ -49,7 +49,18 @@ from src.signals import SignalEngine, SignalParams, SignalReport
 from src.llm_engine import LLMEngine
 from src.prompt_builder import PromptBuilder, AgentFiles, DEFAULTS as PROMPT_DEFAULTS
 import numpy as np
+from src.prompt_builder import PromptBuilder, DEFAULTS as PROMPT_DEFAULTS
+from src.agent_files import AgentFiles
 from src.replay import Tick, Portfolio, TraderDecision
+
+# Agent stubs — virtual trader persona definitions
+from src.agents.registry import create_trader, list_personas, get_persona, load_all_persona_configs
+from src.agents.decision_schema import (
+    TickContext as VTickContext,
+    PortfolioSnapshot as VPortfolioSnapshot,
+    VirtualDecision,
+    validate_decision_list,
+)
 
 log = logging.getLogger("virtual_runner")
 
@@ -193,6 +204,7 @@ def load_virtual_traders(names: Optional[List[str]] = None) -> List[Dict[str, An
         config, and status.
     """
     if _config.get("mock"):
+        # Original mock traders (legacy)
         all_vt = [
             {
                 "id": "vt-mock-1",
@@ -209,8 +221,30 @@ def load_virtual_traders(names: Optional[List[str]] = None) -> List[Dict[str, An
                 "variant_type": "base",
                 "config": {},
                 "status": "active"
-            }
+            },
         ]
+
+        # Add persona-based virtual traders (Phase 1 — agent stubs)
+        persona_configs = load_all_persona_configs()
+        for pid, pconfig in persona_configs.items():
+            persona_instance = create_trader(
+                persona_id=pid,
+                trader_name=f"vt-{pid}-001",
+                starting_cash=_config["starting_cash"],
+                data_bus_url=_config["data_bus_url"],
+            )
+            all_vt.append({
+                "id": f"vt-persona-{pid}",
+                "name": f"vt-{pid}-001",
+                "base_trader": pconfig.get("base_trader") or pid,
+                "variant_type": pid,
+                "config": pconfig.get("default_config", {}),
+                "status": "active",
+                "is_persona": True,
+                "persona_id": pid,
+                "trader_instance": persona_instance,
+            })
+
         if names:
             return [v for v in all_vt if v["name"] in names]
         return all_vt
@@ -779,6 +813,59 @@ def run_one_trader(
 
     except Exception as e:
         log.error("  %-24s ERROR: %s", trader_name, e, exc_info=True)
+        return None
+
+
+# ── Persona-Based Trader Runner ───────────────────────────────────────────────
+
+
+def run_one_persona_trader(
+    trader_instance: Any,
+    tick_context: VTickContext,
+) -> Optional[Dict[str, Any]]:
+    """Run one persona-based virtual trader using its evaluate() method.
+
+    Instead of calling the LLM, this uses the trader's rule-based or
+    ML-based evaluate() logic. Returns a decision dict in the same
+    format as run_one_trader() for compatibility with the orchestrator.
+
+    Args:
+        trader_instance: VirtualTrader subclass instance.
+        tick_context: TickContext with quotes, signals, and portfolio.
+
+    Returns:
+        Decision dict (with 'decision' field) or None.
+    """
+    try:
+        tick_decisions = trader_instance.run_tick(tick_context)
+        actionables = [
+            d for d in tick_decisions.decisions
+            if d.action.value in ("buy", "sell")
+        ]
+
+        if not actionables:
+            log.debug("  %-24s persona no actionable signal", trader_instance.trader_name)
+            return None
+
+        # Pick highest-conviction decision as the "one" decision (legacy compat)
+        best = max(actionables, key=lambda d: d.conviction)
+
+        return {
+            "trader": trader_instance.trader_name,
+            "base": trader_instance.persona_id(),
+            "ticker": best.symbol,
+            "decision": best.action.value.upper(),
+            "conviction": best.conviction,
+            "rationale": best.reasoning[:200],
+            "price": 0.0,
+            "regime": best.metadata.get("regime", "unknown"),
+            "composite_signal": best.conviction,
+            "source": "virtual",
+            "all_decisions": [d.to_dict() for d in tick_decisions.decisions],
+            "portfolio": tick_decisions.portfolio_snapshot.to_dict(),
+        }
+    except Exception as e:
+        log.error("  persona %-24s ERROR: %s", trader_instance.trader_name, e, exc_info=True)
         return None
 
 

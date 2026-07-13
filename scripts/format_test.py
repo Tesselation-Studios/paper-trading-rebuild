@@ -3,18 +3,18 @@
 After-hours prompt format validator.
 
 Runs each trader's prompt through OpenRouter and validates
-that the output contains all required fields for trading.
+that the output matches the SPEC JSON schema.
 
 Usage:
     python3 scripts/format_test.py              # test all traders
     python3 scripts/format_test.py --trader kairos  # test one
 
-Required fields (per SPEC §30):
-    - thesis: >= 20 characters
-    - signals_used: non-empty list
-    - exit_condition: non-empty string
-    - holding_horizon_days: positive integer
-    - action: BUY or SELL or HOLD
+Required fields (per specs/trader-ticks.md):
+    - decision: BUY or SELL or HOLD
+    - ticker: non-empty string for BUY/SELL
+    - conviction: float 0.0-1.0
+    - rationale: >= 10 characters
+    - signal_override: boolean
 """
 
 import argparse
@@ -34,11 +34,11 @@ PROMPT_DIR = Path(__file__).parent.parent / "prompts"
 TRADERS = ["kairos", "aldridge", "stonks"]
 
 REQUIRED_FIELDS = {
-    "thesis": lambda v: isinstance(v, str) and len(v.strip()) >= 20,
-    "signals_used": lambda v: v and v != [] and v != "" and v != "[]",
-    "exit_condition": lambda v: isinstance(v, str) and len(v.strip()) > 0,
-    "holding_horizon_days": lambda v: isinstance(v, (int, float)) and v > 0,
-    "action": lambda v: v in ("BUY", "SELL", "HOLD"),
+    "decision": lambda v: v in ("BUY", "SELL", "HOLD"),
+    "ticker": lambda v: isinstance(v, str) and len(v.strip()) > 0,
+    "conviction": lambda v: isinstance(v, (int, float)) and 0.0 <= v <= 1.0,
+    "rationale": lambda v: isinstance(v, str) and len(v.strip()) >= 10,
+    "signal_override": lambda v: isinstance(v, bool),
 }
 
 
@@ -145,32 +145,32 @@ def main():
             if failures:
                 all_pass = False
                 results[trader] = {"status": "FAIL", "failures": failures, "output": output}
-                print(f"❌ FAILED ({len(failures)} issues):")
+                print(f"\u274c FAILED ({len(failures)} issues):")
                 for f in failures:
                     print(f"  - {f}")
             else:
                 results[trader] = {"status": "PASS", "output": output}
-                print("✅ PASS")
+                print("\u2705 PASS")
 
         except FileNotFoundError as e:
             results[trader] = {"status": "ERROR", "error": str(e)}
             all_pass = False
-            print(f"❌ ERROR: {e}")
+            print(f"\u274c ERROR: {e}")
         except json.JSONDecodeError as e:
             results[trader] = {"status": "ERROR", "error": f"JSON parse failed: {e}"}
             all_pass = False
-            print(f"❌ ERROR: JSON parse failed")
+            print(f"\u274c ERROR: JSON parse failed")
         except Exception as e:
             results[trader] = {"status": "ERROR", "error": str(e)}
             all_pass = False
-            print(f"❌ ERROR: {e}")
+            print(f"\u274c ERROR: {e}")
 
     # Summary
     print(f"\n{'='*60}")
     print(f"SUMMARY: {datetime.now().isoformat()}")
     print(f"{'='*60}")
     for trader, result in results.items():
-        status_emoji = "✅" if result["status"] == "PASS" else "❌"
+        status_emoji = "\u2705" if result["status"] == "PASS" else "\u274c"
         print(f"{status_emoji} {trader}: {result['status']}")
         if result["status"] == "FAIL":
             for f in result["failures"]:

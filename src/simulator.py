@@ -27,7 +27,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from src.llm_engine import LLMEngine, AgentFiles
+from src.llm_engine import LLMEngine
+from src.agent_files import AgentFiles
 from src.metrics import objective_score
 from src.prompt_builder import PromptBuilder
 from src.reflection import Reflection, reflect_on_decision, format_reflections_for_prompt

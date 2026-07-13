@@ -67,7 +67,7 @@ class SignalParams:
     """
 
     # Momentum
-    momentum_threshold: float = 0.55       # [0.3, 0.9]
+    momentum_threshold: float = 0.0005     # [0.0001, 0.01]  — calibrated for 30-min bar returns
     momentum_lookback: int = 20            # [5, 60]
     momentum_decay: float = 0.85           # [0.5, 0.99]
 
@@ -102,7 +102,7 @@ class SignalParams:
     # ── Bounds registry (class-level, not a field) ─────────────────────
 
     _BOUNDS: ClassVar[Dict[str, ParamBound]] = {
-        "momentum_threshold": ParamBound(0.55, 0.3, 0.9),
+        "momentum_threshold": ParamBound(0.0005, 0.0001, 0.01),
         "momentum_lookback": ParamBound(20, 5, 60, is_int=True),
         "momentum_decay": ParamBound(0.85, 0.5, 0.99),
         "rsi_oversold": ParamBound(30.0, 15.0, 40.0),

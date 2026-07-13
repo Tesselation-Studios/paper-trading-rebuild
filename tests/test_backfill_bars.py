@@ -35,10 +35,8 @@ def sample_bars_df():
     MACD(12,26,9) needs 26+ periods; use 40 rows with realistic price movements."""
     now = datetime(2026, 7, 1, 14, 30, tzinfo=timezone.utc)
     rows = []
-    # Oscillating prices to produce meaningful RSI and MACD values
     prices = [100.0]
     for i in range(1, 40):
-        # Alternate up and down with some noise
         if i % 3 == 0:
             prices.append(prices[-1] - 0.3)
         elif i % 5 == 0:
@@ -87,7 +85,6 @@ def test_resolve_all():
     """--tickers all resolves to the union of all trader tickers."""
     tickers = bb.resolve_tickers("all")
     assert len(tickers) >= 30
-    # Should include tickers from all three trader groups
     assert "SPY" in tickers
     assert "COIN" in tickers
     assert "JPM" in tickers
@@ -136,7 +133,6 @@ def test_missing_date_range_fully_covered():
     """All expected dates exist → returns (None, None)."""
     today = date.today()
     existing = set()
-    # days=5 → start = today - 6, end = today. Need 7 dates (inclusive).
     for i in range(7):
         d = today - timedelta(days=i)
         existing.add(d.strftime("%Y-%m-%d"))
@@ -149,7 +145,7 @@ def test_missing_date_range_fully_covered():
 def test_missing_date_range_partial():
     """Some dates missing → returns appropriate range."""
     today = date.today()
-    existing = {today.strftime("%Y-%m-%d")}  # only today
+    existing = {today.strftime("%Y-%m-%d")}
 
     start, end = bb.missing_date_range("TICKER", days=5, existing=existing)
     assert start is not None
@@ -176,24 +172,17 @@ def test_compute_indicators_float64(sample_bars_df):
 
 
 def test_compute_indicators_nan_for_early_rows(sample_bars_df):
-    """Early rows have NaN for indicators that need warmup.
-
-    Uses the sample_bars_df fixture which has 40 rows with oscillating prices.
-    """
+    """Early rows have NaN for indicators that need warmup."""
     result = bb.compute_indicators(sample_bars_df.copy())
 
-    # RSI(14): at least the first row should be NaN (warmup)
     assert result["rsi_14"].iloc[0] is pd.NA or pd.isna(result["rsi_14"].iloc[0])
-    # Later rows should have valid values
     non_nan = result["rsi_14"].iloc[14:].dropna()
     assert len(non_nan) > 0, f"RSI should have non-NaN values after warmup, got {len(non_nan)}"
 
-    # ATR(14): early rows NaN, later rows valid
     assert result["atr_14"].iloc[0] is pd.NA or pd.isna(result["atr_14"].iloc[0])
     non_nan_atr = result["atr_14"].iloc[14:].dropna()
     assert len(non_nan_atr) > 0, f"ATR should have non-NaN values after warmup, got {len(non_nan_atr)}"
 
-    # MACD(12,26,9): early rows NaN, later rows valid
     assert result["macd"].iloc[0] is pd.NA or pd.isna(result["macd"].iloc[0])
     non_nan_macd = result["macd"].iloc[26:].dropna()
     assert len(non_nan_macd) > 0, f"MACD should have non-NaN values after warmup, got {len(non_nan_macd)}"
@@ -208,7 +197,6 @@ def test_merge_no_existing(sample_bars_df, temp_bars_dir):
     path = temp_bars_dir / "NEW.parquet"
     result = bb.merge_and_dedup(path, sample_bars_df)
     assert len(result) == len(sample_bars_df)
-    # result should be sorted by timestamp
     assert result["timestamp"].is_monotonic_increasing
 
 
@@ -216,7 +204,6 @@ def test_merge_dedup_keeps_newer(temp_bars_dir):
     """When merging, duplicate timestamps keep the newer row."""
     ts = pd.Timestamp("2026-07-01 14:30:00+00:00")
 
-    # Existing: old value
     existing = pd.DataFrame({
         "timestamp": [ts],
         "open": [100.0],
@@ -228,7 +215,6 @@ def test_merge_dedup_keeps_newer(temp_bars_dir):
     path = temp_bars_dir / "DEDUP.parquet"
     existing.to_parquet(path, index=False)
 
-    # New: same timestamp, different values
     new = pd.DataFrame({
         "timestamp": [ts],
         "open": [200.0],
@@ -240,7 +226,7 @@ def test_merge_dedup_keeps_newer(temp_bars_dir):
 
     result = bb.merge_and_dedup(path, new)
     assert len(result) == 1
-    assert result["open"].iloc[0] == 200.0  # newer value wins
+    assert result["open"].iloc[0] == 200.0
 
 
 def test_merge_appends_new_timestamps(temp_bars_dir):
@@ -281,7 +267,6 @@ def test_atomic_write_creates_file(sample_bars_df, temp_bars_dir):
     """Atomic write creates a valid Parquet file."""
     path = temp_bars_dir / "ATOMIC.parquet"
     bb.atomic_write(sample_bars_df, path)
-
     assert path.exists()
     df = pd.read_parquet(path)
     assert len(df) == len(sample_bars_df)
@@ -290,85 +275,135 @@ def test_atomic_write_creates_file(sample_bars_df, temp_bars_dir):
 def test_atomic_write_overwrites(sample_bars_df, temp_bars_dir):
     """Atomic write overwrites existing file."""
     path = temp_bars_dir / "OVERWRITE.parquet"
-
-    # Write once
     small = sample_bars_df.iloc[:5].copy()
     bb.atomic_write(small, path)
     assert len(pd.read_parquet(path)) == 5
-
-    # Overwrite with full
     bb.atomic_write(sample_bars_df, path)
     assert len(pd.read_parquet(path)) == len(sample_bars_df)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# fetch_bars — mocked
+# fetch_bars_alpaca — mocked Alpaca client
 # ══════════════════════════════════════════════════════════════════════════════
 
-def test_fetch_bars_returns_dataframe():
-    """fetch_bars returns proper DataFrame with mocked yfinance."""
-    mock_df = pd.DataFrame({
-        "Datetime": [
-            pd.Timestamp("2026-07-01 14:30:00", tz="UTC"),
-            pd.Timestamp("2026-07-01 14:35:00", tz="UTC"),
-        ],
-        "Open": [100.0, 101.0],
-        "High": [102.0, 103.0],
-        "Low": [99.0, 100.0],
-        "Close": [101.0, 102.0],
-        "Volume": [10000, 12000],
-    })
+@pytest.fixture
+def mock_bar():
+    bar = MagicMock()
+    bar.timestamp = pd.Timestamp("2026-07-01 14:30:00", tz="UTC")
+    bar.open = 100.0
+    bar.high = 102.0
+    bar.low = 99.0
+    bar.close = 101.0
+    bar.volume = 10000
+    return bar
 
-    with patch("backfill_bars.yf.download", return_value=mock_df):
-        result = bb.fetch_bars("AAPL", "2026-07-01", "2026-07-02")
+
+@pytest.fixture
+def mock_alpaca_client(mock_bar):
+    bar2 = MagicMock()
+    bar2.timestamp = pd.Timestamp("2026-07-01 14:35:00", tz="UTC")
+    bar2.open = 101.0
+    bar2.high = 103.0
+    bar2.low = 100.0
+    bar2.close = 102.0
+    bar2.volume = 12000
+
+    client = MagicMock(spec=bb.StockHistoricalDataClient)
+    resp = MagicMock()
+    resp.data = {"AAPL": [mock_bar, bar2]}
+    client.get_stock_bars.return_value = resp
+    return client
+
+
+@pytest.fixture
+def mock_empty_client():
+    client = MagicMock(spec=bb.StockHistoricalDataClient)
+    resp = MagicMock()
+    resp.data = {"AAPL": []}
+    client.get_stock_bars.return_value = resp
+    return client
+
+
+@pytest.fixture
+def mock_error_client():
+    client = MagicMock(spec=bb.StockHistoricalDataClient)
+    client.get_stock_bars.side_effect = Exception("Alpaca API error")
+    return client
+
+
+@pytest.fixture
+def mock_many_bars():
+    bars = []
+    for i in range(14):
+        h = 9 + (i // 2)
+        m = 0 if i % 2 == 0 else 30
+        bar = MagicMock()
+        bar.timestamp = pd.Timestamp(f"2026-07-01 {h:02d}:{m:02d}:00", tz="UTC")
+        bar.open = 100.0 + i
+        bar.high = 102.0 + i
+        bar.low = 99.0 + i
+        bar.close = 101.0 + i
+        bar.volume = 10000 + i * 100
+        bars.append(bar)
+    return bars
+
+
+@pytest.fixture
+def mock_alpaca_client_14bars(mock_many_bars):
+    client = MagicMock(spec=bb.StockHistoricalDataClient)
+    resp = MagicMock()
+    resp.data = {"SPY": mock_many_bars}
+    client.get_stock_bars.return_value = resp
+    return client
+
+
+def test_fetch_bars_alpaca_returns_dataframe(mock_alpaca_client):
+    """fetch_bars_alpaca returns proper DataFrame."""
+    result = bb.fetch_bars_alpaca(mock_alpaca_client, "AAPL", "2026-07-01", "2026-07-02")
 
     assert result is not None
     assert len(result) == 2
     assert list(result.columns) == ["timestamp", "open", "high", "low", "close", "volume"]
-    assert result["timestamp"].dt.tz is not None  # has timezone
+    assert result["timestamp"].dt.tz is not None
+    assert result["close"].iloc[0] == 101.0
+    assert result["close"].iloc[1] == 102.0
 
 
-def test_fetch_bars_empty():
-    """Empty DataFrame → None."""
-    with patch("backfill_bars.yf.download", return_value=pd.DataFrame()):
-        result = bb.fetch_bars("AAPL", "2026-01-01", "2026-01-02")
+def test_fetch_bars_alpaca_empty(mock_empty_client):
+    """Empty data returns None."""
+    result = bb.fetch_bars_alpaca(mock_empty_client, "AAPL", "2026-01-01", "2026-01-02")
     assert result is None
 
 
-def test_fetch_bars_error():
-    """Exception → None."""
-    with patch("backfill_bars.yf.download", side_effect=Exception("Network error")):
-        result = bb.fetch_bars("AAPL", "2026-01-01", "2026-01-02")
+def test_fetch_bars_alpaca_missing_ticker():
+    """Ticker not in response returns None."""
+    client = MagicMock(spec=bb.StockHistoricalDataClient)
+    resp = MagicMock()
+    resp.data = {}
+    client.get_stock_bars.return_value = resp
+    result = bb.fetch_bars_alpaca(client, "AAPL", "2026-01-01", "2026-01-02")
+    assert result is None
+
+
+def test_fetch_bars_alpaca_error(mock_error_client):
+    """Exception returns None."""
+    result = bb.fetch_bars_alpaca(mock_error_client, "AAPL", "2026-01-01", "2026-01-02")
     assert result is None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# backfill_ticker — integration with mocked yfinance
+# backfill_ticker — integration with mocked Alpaca client
 # ══════════════════════════════════════════════════════════════════════════════
 
-def test_backfill_ticker_creates_parquet(temp_bars_dir):
+def test_backfill_ticker_creates_parquet(temp_bars_dir, mock_alpaca_client_14bars):
     """Full backfill flow creates a valid Parquet with indicators."""
-    mock_df = pd.DataFrame({
-        "Datetime": [
-            pd.Timestamp(f"2026-07-01 {h:02d}:{m:02d}:00", tz="UTC")
-            for h in range(9, 16) for m in (0, 30)
-        ],
-        "Open":  [100.0 + i for i in range(14)],
-        "High":  [102.0 + i for i in range(14)],
-        "Low":   [99.0 + i for i in range(14)],
-        "Close": [101.0 + i for i in range(14)],
-        "Volume": [10000 + i * 100 for i in range(14)],
-    })
-
-    with patch("backfill_bars.yf.download", return_value=mock_df):
-        ticker, status, count = bb.backfill_ticker(
-            "SPY", days=5, force=True, verbose=False,
-        )
+    ticker, status, count = bb.backfill_ticker(
+        mock_alpaca_client_14bars, "SPY", days=5, force=True, verbose=False,
+    )
 
     assert status == "ok"
     assert count == 14
 
-    # Verify Parquet file exists
     path = temp_bars_dir / "SPY.parquet"
     assert path.exists()
 
@@ -379,57 +414,54 @@ def test_backfill_ticker_creates_parquet(temp_bars_dir):
     for col in expected_cols:
         assert col in df.columns, f"Missing: {col}"
 
-    # Verify types
-    assert df["timestamp"].dtype.kind == "M"  # datetime
+    assert df["timestamp"].dtype.kind == "M"
     assert df["close"].dtype == "float64"
-    # RSI should have some non-NaN values since we have exactly 14 rows
-    # (last row should have RSI computed)
 
 
 def test_backfill_ticker_idempotent(temp_bars_dir):
     """Running backfill twice doesn't create duplicates."""
-    ts = [
-        pd.Timestamp("2026-07-01 14:30:00", tz="UTC"),
-        pd.Timestamp("2026-07-01 14:35:00", tz="UTC"),
-    ]
+    bar1 = MagicMock()
+    bar1.timestamp = pd.Timestamp("2026-07-01 14:30:00", tz="UTC")
+    bar1.open = 100.0
+    bar1.high = 102.0
+    bar1.low = 99.0
+    bar1.close = 101.0
+    bar1.volume = 10000
 
-    mock_df = pd.DataFrame({
-        "Datetime": ts,
-        "Open": [100.0, 101.0],
-        "High": [102.0, 103.0],
-        "Low": [99.0, 100.0],
-        "Close": [101.0, 102.0],
-        "Volume": [10000, 12000],
-    })
+    bar2 = MagicMock()
+    bar2.timestamp = pd.Timestamp("2026-07-01 14:35:00", tz="UTC")
+    bar2.open = 101.0
+    bar2.high = 103.0
+    bar2.low = 100.0
+    bar2.close = 102.0
+    bar2.volume = 12000
 
-    # First run with force=True
-    with patch("backfill_bars.yf.download", return_value=mock_df):
-        bb.backfill_ticker("AAPL", days=5, force=True, verbose=False)
+    client = MagicMock(spec=bb.StockHistoricalDataClient)
+    resp = MagicMock()
+    resp.data = {"AAPL": [bar1, bar2]}
+    client.get_stock_bars.return_value = resp
 
-    # Second run with force=True and same data — should produce 2 unique rows
-    with patch("backfill_bars.yf.download", return_value=mock_df):
-        ticker, status, count = bb.backfill_ticker(
-            "AAPL", days=5, force=True, verbose=False,
-        )
-        assert status == "ok"
+    bb.backfill_ticker(client, "AAPL", days=5, force=True, verbose=False)
+    ticker, status, count = bb.backfill_ticker(
+        client, "AAPL", days=5, force=True, verbose=False,
+    )
+    assert status == "ok"
 
-    # Verify no duplicates (merge_and_dedup should have eliminated them)
     df = pd.read_parquet(temp_bars_dir / "AAPL.parquet")
     assert len(df) == 2
     assert df["timestamp"].nunique() == 2
 
 
 def test_backfill_ticker_check_only(temp_bars_dir, capsys):
-    """--check mode prints gaps but doesn't write."""
-    with patch("backfill_bars.yf.download") as mock_download:
-        ticker, status, count = bb.backfill_ticker(
-            "MSFT", days=5, force=False, check_only=True, verbose=True,
-        )
-        mock_download.assert_not_called()
+    """--check mode prints gaps but doesn't call get_stock_bars."""
+    client = MagicMock(spec=bb.StockHistoricalDataClient)
+    ticker, status, count = bb.backfill_ticker(
+        client, "MSFT", days=5, force=False, check_only=True, verbose=True,
+    )
+    client.get_stock_bars.assert_not_called()
 
     assert status in ("ok", "gaps")
     captured = capsys.readouterr()
-    # Should mention the ticker
     assert "MSFT" in captured.out or "MSFT" in captured.err
 
 
@@ -445,21 +477,16 @@ def test_parquet_schema_matches_spec(sample_bars_df, temp_bars_dir):
 
     df = pd.read_parquet(path)
 
-    # Spec: timestamp (datetime64[ns, UTC])
     assert df["timestamp"].dtype.kind == "M"
-    # Check timezone
     ts = df["timestamp"].iloc[0]
     assert ts.tzinfo is not None
 
-    # Spec: open, high, low, close (float64)
     for col in ["open", "high", "low", "close"]:
         assert col in df.columns
         assert df[col].dtype == "float64", f"{col} is {df[col].dtype}"
-    # volume: float64 or int64 are both acceptable
     assert "volume" in df.columns
     assert df["volume"].dtype.kind in ("f", "i"), f"volume is {df['volume'].dtype}"
 
-    # Spec: rsi_14, macd, macd_signal, macd_hist, atr_14 (float64)
     for col in ["rsi_14", "macd", "macd_signal", "macd_hist", "atr_14"]:
         assert col in df.columns
         assert df[col].dtype == "float64", f"{col} is {df[col].dtype}"

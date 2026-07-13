@@ -1,52 +1,44 @@
 #!/usr/bin/env python3
 """
-Decision Format Validator — validates trader outputs match the required JSON schema.
+Decision Format Validator — validates trader outputs match the SPEC JSON schema.
 
-Per SPEC §4.2, every trader must output a JSON decision with specific fields.
-The risk gate enforces format quality (invariant #12 — bootstrap mode downgrades
-vetoes to warnings). This validator provides comprehensive format checking that
-can be used in CI, nightly validation, and the risk gate itself.
+Per SPEC §4.2 (trader-ticks.md), every trader must output a JSON decision with
+specific fields. The risk gate enforces format quality (invariant #12 — bootstrap
+mode downgrades vetoes to warnings). This validator provides comprehensive format
+checking that can be used in CI, nightly validation, and the risk gate itself.
 
-Validates:
-    - JSON parseability
-    - Required fields present
-    - Field types correct
-    - Value ranges valid
-    - Business rules (thesis ≥ 20 chars, signals_used non-empty, etc.)
+SPEC schema (from specs/trader-ticks.md):
+    {
+      "decision": "BUY | SELL | HOLD",
+      "ticker": "AAPL",
+      "conviction": 0.72,
+      "rationale": "Momentum signal 0.81, RSI at 42, SPY trending up.",
+      "signal_override": false,
+      "override_reason": null
+    }
 """
 
 import json
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Any, Dict, List, Optional, Tuple
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
 VALID_ACTIONS = frozenset({"BUY", "SELL", "HOLD"})
-VALID_EXIT_CONDITIONS = frozenset({
-    "stop_loss_hit",
-    "profit_target_hit",
-    "thesis_broken",
-    "time_stop",
-    "signal_decay",
-})
 REQUIRED_FIELDS = [
-    "action",
+    "decision",
     "ticker",
-    "quantity",
-    "stop_loss",
-    "confidence",
-    "thesis",
-    "signals_used",
-    "exit_condition",
-    "holding_horizon_days",
+    "conviction",
+    "rationale",
+    "signal_override",
 ]
-THESIS_MIN_CHARS = 20
-CONFIDENCE_MIN = 0.0
-CONFIDENCE_MAX = 1.0
-MIN_HOLDING_DAYS = 1
+CONVICTION_MIN = 0.0
+CONVICTION_MAX = 1.0
+RATIONALE_MIN_CHARS = 10
 
 
 # ── Data Structures ─────────────────────────────────────────────────────────────
+
 
 @dataclass
 class ValidationError:
@@ -93,28 +85,25 @@ class ValidationResult:
 
 
 class DecisionFormatValidator:
-    """Validate that a trader's JSON decision matches the required format.
+    """Validate that a trader's JSON decision matches the SPEC schema.
 
     Usage:
         validator = DecisionFormatValidator()
         result = validator.validate(trader_json_string, trader_name="kairos")
 
-    Per SPEC §4.2 output format:
+    Per SPEC (specs/trader-ticks.md) output format:
         {
-          "action": "BUY | SELL | HOLD",
-          "ticker": "AAPL or null if HOLD",
-          "quantity": int,
-          "stop_loss": float/dollar,
-          "confidence": 0.0-1.0,
-          "thesis": "20+ char explanation",
-          "signals_used": ["sig1", "sig2"],
-          "exit_condition": "stop_loss_hit | profit_target_hit | ...",
-          "holding_horizon_days": int
+          "decision": "BUY | SELL | HOLD",
+          "ticker": "AAPL",
+          "conviction": 0.0-1.0,
+          "rationale": "explanation string",
+          "signal_override": false,
+          "override_reason": null
         }
     """
 
-    def __init__(self, thesis_min_chars: int = THESIS_MIN_CHARS):
-        self.thesis_min_chars = thesis_min_chars
+    def __init__(self, rationale_min_chars: int = RATIONALE_MIN_CHARS):
+        self.rationale_min_chars = rationale_min_chars
 
     def validate(
         self, raw_output: str, trader: str = "unknown"
@@ -169,31 +158,38 @@ class DecisionFormatValidator:
                     )
                 )
 
-        # ── Step 3: Action validation ───────────────────────────────────────
-        raw_action = decision.get("action", "")
-        if isinstance(raw_action, str):
-            action = raw_action.upper().strip()
+        # Early exit if missing required fields (avoids cascading errors)
+        if any(e.severity == "ERROR" for e in errors
+               if e.field in REQUIRED_FIELDS):
+            return ValidationResult(
+                is_valid=False, trader=trader, errors=errors, warnings=warnings
+            )
+
+        # ── Step 3: Decision validation ─────────────────────────────────────
+        raw_decision = decision.get("decision", "")
+        if isinstance(raw_decision, str):
+            dec = raw_decision.upper().strip()
         else:
-            action = str(raw_action).upper().strip()
+            dec = str(raw_decision).upper().strip()
 
-        if not action:
+        if not dec:
             errors.append(
                 ValidationError(
-                    field="action",
-                    message="Action is empty or missing. Must be BUY, SELL, or HOLD",
+                    field="decision",
+                    message="Decision is empty or missing. Must be BUY, SELL, or HOLD",
                     severity="ERROR",
                 )
             )
-        elif action not in VALID_ACTIONS:
+        elif dec not in VALID_ACTIONS:
             errors.append(
                 ValidationError(
-                    field="action",
-                    message=f"Invalid action '{action}'. Must be BUY, SELL, or HOLD",
+                    field="decision",
+                    message=f"Invalid decision '{dec}'. Must be BUY, SELL, or HOLD",
                     severity="ERROR",
                 )
             )
 
-        is_trade = action in ("BUY", "SELL")
+        is_trade = dec in ("BUY", "SELL")
 
         # ── Step 4: Ticker validation ───────────────────────────────────────
         ticker = decision.get("ticker")
@@ -202,7 +198,7 @@ class DecisionFormatValidator:
                 errors.append(
                     ValidationError(
                         field="ticker",
-                        message=f"Ticker required for {action} but was null/empty",
+                        message=f"Ticker required for {dec} but was null/empty",
                         severity="ERROR",
                     )
                 )
@@ -217,240 +213,85 @@ class DecisionFormatValidator:
                         )
                     )
 
-        # ── Step 5: Quantity validation ─────────────────────────────────────
-        quantity = decision.get("quantity")
-        if is_trade:
-            if quantity is None:
-                errors.append(
-                    ValidationError(
-                        field="quantity",
-                        message=f"Quantity required for {action} but was null",
-                        severity="ERROR",
-                    )
-                )
-            else:
-                try:
-                    # Must be an actual int, not a float that looks like an int
-                    if isinstance(quantity, bool) or not isinstance(quantity, (int, float)):
-                        raise ValueError("not numeric")
-                    if isinstance(quantity, float) and quantity != int(quantity):
-                        raise ValueError("float with decimals")
-                    qty = int(quantity)
-                    if qty <= 0:
-                        errors.append(
-                            ValidationError(
-                                field="quantity",
-                                message=f"Quantity must be positive, got {qty}",
-                                severity="ERROR",
-                            )
-                        )
-                    if qty > 10000:
-                        warnings.append(
-                            ValidationError(
-                                field="quantity",
-                                message=f"Quantity {qty} is unusually large",
-                                severity="WARNING",
-                            )
-                        )
-                except (ValueError, TypeError):
-                    errors.append(
-                        ValidationError(
-                            field="quantity",
-                            message=f"Quantity must be an integer, got {type(quantity).__name__}: {quantity}",
-                            severity="ERROR",
-                        )
-                    )
-
-        # ── Step 6: Stop loss validation ────────────────────────────────────
-        stop_loss = decision.get("stop_loss")
-        if is_trade and stop_loss is None:
-            # During bootstrap, this is a warning; after bootstrap, it's an error
-            # Per invariant #12 — bootstrap mode downgrades to WARNING
-            warnings.append(
-                ValidationError(
-                    field="stop_loss",
-                    message=f"Stop loss is null for {action}. Per spec, stop_loss is mandatory.",
-                    severity="WARNING",
-                )
-            )
-
-        # ── Step 7: Confidence validation ───────────────────────────────────
-        confidence = decision.get("confidence")
-        if confidence is not None:
+        # ── Step 5: Conviction validation ───────────────────────────────────
+        conviction = decision.get("conviction")
+        if conviction is not None:
             try:
-                conf = float(confidence)
-                if conf < CONFIDENCE_MIN or conf > CONFIDENCE_MAX:
+                conf = float(conviction)
+                if conf < CONVICTION_MIN or conf > CONVICTION_MAX:
                     errors.append(
                         ValidationError(
-                            field="confidence",
-                            message=f"Confidence {conf} outside valid range [{CONFIDENCE_MIN}, {CONFIDENCE_MAX}]",
+                            field="conviction",
+                            message=f"Conviction {conf} outside valid range [{CONVICTION_MIN}, {CONVICTION_MAX}]",
                             severity="ERROR",
                         )
                     )
             except (ValueError, TypeError):
                 errors.append(
                     ValidationError(
-                        field="confidence",
-                        message=f"Confidence must be a float, got {type(confidence).__name__}: {confidence}",
+                        field="conviction",
+                        message=f"Conviction must be a float, got {type(conviction).__name__}: {conviction}",
                         severity="ERROR",
                     )
                 )
+        else:
+            errors.append(
+                ValidationError(
+                    field="conviction",
+                    message="Conviction is required and must be a float",
+                    severity="ERROR",
+                )
+            )
 
-        # ── Step 8: Thesis validation ───────────────────────────────────────
-        thesis = decision.get("thesis", "")
+        # ── Step 6: Rationale validation ────────────────────────────────────
+        rationale = decision.get("rationale", "")
         if is_trade:
-            if not thesis:
+            if not rationale or not isinstance(rationale, str) or not rationale.strip():
                 errors.append(
                     ValidationError(
-                        field="thesis",
-                        message=f"Thesis is empty — required for {action}",
+                        field="rationale",
+                        message=f"Rationale is empty — required for {dec}",
                         severity="ERROR",
                     )
                 )
-            elif isinstance(thesis, str) and len(thesis.strip()) < self.thesis_min_chars:
+            elif isinstance(rationale, str) and len(rationale.strip()) < self.rationale_min_chars:
                 errors.append(
                     ValidationError(
-                        field="thesis",
+                        field="rationale",
                         message=(
-                            f"Thesis too short ({len(thesis.strip())} chars). "
-                            f"Minimum {self.thesis_min_chars} characters."
+                            f"Rationale too short ({len(rationale.strip())} chars). "
+                            f"Minimum {self.rationale_min_chars} characters."
                         ),
                         severity="ERROR",
                     )
                 )
 
-        # ── Step 9: Signals used validation ─────────────────────────────────
-        signals_used = decision.get("signals_used")
-        if is_trade:
-            if signals_used is None:
+        # ── Step 7: Signal override validation ──────────────────────────────
+        signal_override = decision.get("signal_override")
+        if signal_override is not None:
+            if not isinstance(signal_override, bool):
                 errors.append(
                     ValidationError(
-                        field="signals_used",
-                        message=f"signals_used is null — required for {action}",
+                        field="signal_override",
+                        message=f"signal_override must be a boolean, got {type(signal_override).__name__}: {signal_override}",
                         severity="ERROR",
                     )
                 )
-            elif not isinstance(signals_used, list):
-                errors.append(
-                    ValidationError(
-                        field="signals_used",
-                        message=(
-                            f"signals_used must be a list, got "
-                            f"{type(signals_used).__name__}"
-                        ),
-                        severity="ERROR",
-                    )
+        else:
+            errors.append(
+                ValidationError(
+                    field="signal_override",
+                    message="signal_override is required and must be a boolean",
+                    severity="ERROR",
                 )
-            elif len(signals_used) == 0:
-                errors.append(
-                    ValidationError(
-                        field="signals_used",
-                        message="signals_used list is empty — at least 1 signal required",
-                        severity="ERROR",
-                    )
-                )
-            else:
-                # Validate each signal is a string
-                non_strings = [
-                    s for s in signals_used if not isinstance(s, str)
-                ]
-                if non_strings:
-                    errors.append(
-                        ValidationError(
-                            field="signals_used",
-                            message=(
-                                f"All signals must be strings. Non-string entries: "
-                                f"{non_strings}"
-                            ),
-                            severity="ERROR",
-                        )
-                    )
+            )
 
-        # ── Step 10: Exit condition validation ──────────────────────────────
-        exit_condition = decision.get("exit_condition", "")
-        if is_trade:
-            if not exit_condition:
-                errors.append(
-                    ValidationError(
-                        field="exit_condition",
-                        message=f"exit_condition is empty — required for {action}",
-                        severity="ERROR",
-                    )
-                )
-            elif isinstance(exit_condition, str) and exit_condition not in VALID_EXIT_CONDITIONS:
-                errors.append(
-                    ValidationError(
-                        field="exit_condition",
-                        message=(
-                            f"Invalid exit_condition '{exit_condition}'. "
-                            f"Must be one of: {sorted(VALID_EXIT_CONDITIONS)}"
-                        ),
-                        severity="ERROR",
-                    )
-                )
-
-        # ── Step 11: Holding horizon validation ─────────────────────────────
-        holding_horizon = decision.get("holding_horizon_days")
-        if is_trade:
-            if holding_horizon is None:
-                errors.append(
-                    ValidationError(
-                        field="holding_horizon_days",
-                        message=f"holding_horizon_days is null — required for {action}",
-                        severity="ERROR",
-                    )
-                )
-            else:
-                try:
-                    # Must be an actual int, not a float with decimals
-                    if isinstance(holding_horizon, bool) or not isinstance(holding_horizon, (int, float)):
-                        raise ValueError("not numeric")
-                    if isinstance(holding_horizon, float) and holding_horizon != int(holding_horizon):
-                        raise ValueError("float with decimals")
-                    hh = int(holding_horizon)
-                    if hh < MIN_HOLDING_DAYS:
-                        errors.append(
-                            ValidationError(
-                                field="holding_horizon_days",
-                                message=(
-                                    f"holding_horizon_days={hh} is below minimum {MIN_HOLDING_DAYS}"
-                                ),
-                                severity="ERROR",
-                            )
-                        )
-                    if hh > 365:
-                        warnings.append(
-                            ValidationError(
-                                field="holding_horizon_days",
-                                message=(
-                                    f"holding_horizon_days={hh} is unusually long (>365 days)"
-                                ),
-                                severity="WARNING",
-                            )
-                        )
-                except (ValueError, TypeError):
-                    errors.append(
-                        ValidationError(
-                            field="holding_horizon_days",
-                            message=(
-                                f"holding_horizon_days must be an integer, got "
-                                f"{type(holding_horizon).__name__}: {holding_horizon}"
-                            ),
-                            severity="ERROR",
-                        )
-                    )
-
-        # ── Step 12: Reasoning/mood (optional but encouraged) ───────────────
-        has_reasoning = bool(decision.get("reasoning", ""))
-        has_mood = bool(decision.get("mood", ""))
-        if not has_reasoning and not has_mood and is_trade:
+        # ── Step 8: HOLD with missing ticker ────────────────────────────────
+        if not is_trade and ticker is not None and ticker != "":
             warnings.append(
                 ValidationError(
-                    field="reasoning/mood",
-                    message=(
-                        "Neither 'reasoning' nor 'mood' field present. "
-                        "Encouraged for journal analysis."
-                    ),
+                    field="ticker",
+                    message=f"Ticker '{ticker}' provided but decision is {dec}. Should be null for HOLD.",
                     severity="WARNING",
                 )
             )

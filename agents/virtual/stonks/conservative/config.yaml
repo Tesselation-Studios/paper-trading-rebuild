@@ -1,0 +1,38 @@
+name: Stonks Conservative
+base_trader: stonks
+variant_type: conservative
+description: Sentiment-aware with technical confirmation — disciplined social trading
+
+model:
+  primary: openrouter/deepseek/deepseek-v4-flash
+
+risk:
+  max_position_pct: 0.06
+  max_exposure_pct: 0.30
+  stop_loss_pct: 0.04
+  max_daily_loss: 200
+  cash_reserve: 3000
+  min_shares_per_position: 1
+  max_positions: 3
+
+signals:
+  momentum_weight: 0.35
+  sentiment_weight: 0.40
+  regime_weight: 0.25
+  minimum_confidence: 0.60
+  confirmations_required: 2
+
+social_sentiment:
+  volume_spike_threshold: 3.0
+  sentiment_positive_threshold: 0.60
+  min_mention_spike: 5.0
+  unusual_options_volume: false
+
+exit_rules:
+  profit_target_pct: 0.12
+  max_hold_days: 5
+  stale_days: 3
+
+evaluation:
+  eval_window_days: 5
+  objective_metric: calmar_ratio

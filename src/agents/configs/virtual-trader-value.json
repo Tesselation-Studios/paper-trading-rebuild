@@ -1,0 +1,66 @@
+{
+    "agent": {
+        "id": "virtual-trader-value",
+        "name": "Virtual Value — Sterling Capital",
+        "enabled": false,
+        "model": {
+            "primary": "openrouter/deepseek/deepseek-v4-flash",
+            "fallbacks": [
+                "openrouter/deepseek/deepseek-v4-pro",
+                "openrouter/deepseek/deepseek-v3.2",
+                "openrouter/anthropic/claude-sonnet-4-6",
+                "openrouter/auto"
+            ]
+        },
+        "workspace": "/home/openclaw/.openclaw/workspace-vt-value",
+        "system_prompt": {
+            "template": "IDENTITY.md",
+            "base_trader": "aldridge",
+            "persona": "value_contrarian"
+        },
+        "tools": {
+            "profile": "restricted",
+            "allow": [
+                "web_fetch",
+                "exec"
+            ]
+        },
+        "skills": [
+            "trade-execution",
+            "market-data",
+            "virtual-trader-value-strategy"
+        ],
+        "heartbeat": {
+            "every": "5m",
+            "timeoutSeconds": 900,
+            "lightContext": true,
+            "activeHours": {
+                "start": "09:30",
+                "end": "16:00",
+                "timezone": "America/New_York"
+            },
+            "skipWhenBusy": false
+        },
+        "thinkingDefault": "off",
+        "fastModeDefault": true
+    },
+    "persona_config": {
+        "max_positions": 7,
+        "min_positions": 3,
+        "max_portfolio_pct": 0.15,
+        "target_position_pct": 0.12,
+        "min_conviction": 0.5,
+        "rsi_oversold": 35,
+        "rsi_overbought": 65,
+        "price_drop_threshold": 0.02,
+        "fair_value_premium": 0.15,
+        "pe_ratio_max": 25.0,
+        "pb_ratio_max": 3.0,
+        "min_holding_ticks": 3
+    },
+    "routing": {
+        "dispatcher": "orchestrator",
+        "group": "virtual-traders",
+        "priority": 10
+    }
+}

@@ -493,6 +493,13 @@ def run_for_agent(agent_id: str) -> Dict[str, Any]:
     print(f"  Trades:    {len(trades)}")
     print(f"  Journal:   {len(journal)}")
 
+    # Initialize variables used across steps (avoid NameError when data is sparse)
+    insights = []
+    high_conviction = []
+    low_conviction = []
+    win_rate = 0
+    total_pnl = 0.0
+
     # Step 1: Journal analysis
     print(f"\n  🔍 Journal Analysis...")
     if journal:
@@ -562,6 +569,8 @@ def run_for_agent(agent_id: str) -> Dict[str, Any]:
         print(f"    Worst:     {worst.get('ticker','?')} ${worst.get('pnl',0):.2f}")
     else:
         print(f"    No trades found")
+        total_pnl = 0.0
+        win_rate = 0
 
     # Step 4: Synthesis
     print(f"\n  🧬 Synthesis...")

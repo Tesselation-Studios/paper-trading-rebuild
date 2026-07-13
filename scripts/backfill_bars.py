@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
-# NOTE: Requires yfinance >= 1.0 (use .venv/bin/python3 if system yfinance is < 1.0)
 """
-Backfill historical 5-min OHLCV bars for core tickers via Yahoo Finance (yfinance).
+Backfill historical 5-min OHLCV bars for core tickers via Alpaca API.
 
 Writes to shared/cache/bars/<ticker>.parquet with technical indicators
 (RSI, MACD, ATR) computed via pandas_ta.
@@ -14,7 +13,16 @@ Usage:
     python3 scripts/backfill_bars.py --tickers AAPL,MSFT --days 30
     python3 scripts/backfill_bars.py --tickers core --days 20 --check   # dry-run
     python3 scripts/backfill_bars.py --tickers all --days 10 --force    # all tickers
+
+Environment:
+    Any of the following Alpaca credential pairs are accepted (checked in order):
+      ALPACA_KAIROS_KEY / ALPACA_KAIROS_SECRET
+      KAIROS_API_KEY    / KAIROS_SECRET_KEY
+      ALPACA_ALDRIDGE_KEY / ALPACA_ALDRIDGE_SECRET
+      ALPACA_STONKS_KEY / ALPACA_STONKS_SECRET
 """
+
+from __future__ import annotations
 
 import argparse
 import os
@@ -33,16 +41,20 @@ BARS_DIR = SHARED_DIR / "cache" / "bars"
 BARS_DIR.mkdir(parents=True, exist_ok=True)
 
 # ── Dependencies ─────────────────────────────────────────────────────────────
-import pandas as pd
+import pandas as pd  # noqa: E402
 import pandas_ta as ta  # noqa: E402
-import yfinance as yf  # noqa: E402
+
+from alpaca.data.historical import StockHistoricalDataClient  # noqa: E402
+from alpaca.data.requests import StockBarsRequest  # noqa: E402
+from alpaca.data.timeframe import TimeFrame, TimeFrameUnit  # noqa: E402
+
 
 # ── Ticker groups ────────────────────────────────────────────────────────────
 CORE_TICKERS: List[str] = [
     "SPY", "AAPL", "MSFT", "NVDA", "TSLA", "META", "GOOGL", "AMZN",
 ]
 
-# Extended ticker list from trader configurations (prepopulate_data.py)
+# Extended ticker list from trader configurations
 TRADER_TICKERS: Dict[str, List[str]] = {
     "kairos": [
         "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA",
@@ -59,10 +71,11 @@ TRADER_TICKERS: Dict[str, List[str]] = {
     ],
 }
 
-# Interval for yfinance downloads
-INTERVAL = "5m"
-# Rate limit: seconds between ticker fetches
-FETCH_DELAY = 0.5
+# Alpaca bar interval — 5 minutes
+ALPACA_TIMEFRAME = TimeFrame(5, TimeFrameUnit.Minute)
+
+# Rate limit: seconds between ticker fetches (Alpaca allows ~200 req/min)
+FETCH_DELAY = 0.35
 
 # ── Technical indicator parameters ───────────────────────────────────────────
 RSI_LENGTH = 14
@@ -72,14 +85,59 @@ MACD_SIGNAL = 9
 ATR_LENGTH = 14
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# Alpaca Helpers
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def get_alpaca_credentials() -> Tuple[Optional[str], Optional[str]]:
+    """Get Alpaca API credentials from environment variables.
+
+    Checks Alpaca key pairs in priority order.
+    """
+    candidates = [
+        ("ALPACA_KAIROS_KEY", "ALPACA_KAIROS_SECRET"),
+        ("KAIROS_API_KEY", "KAIROS_SECRET_KEY"),
+        ("ALPACA_ALDRIDGE_KEY", "ALPACA_ALDRIDGE_SECRET"),
+        ("ALDRIDGE_API_KEY", "ALDRIDGE_SECRET_KEY"),
+        ("ALPACA_STONKS_KEY", "ALPACA_STONKS_SECRET"),
+        ("STONKS_API_KEY", "STONKS_SECRET_KEY"),
+    ]
+    for key_var, sec_var in candidates:
+        k = os.getenv(key_var)
+        s = os.getenv(sec_var)
+        if k and s:
+            return k, s
+    return None, None
+
+
+def create_alpaca_client() -> StockHistoricalDataClient:
+    """Create and return an Alpaca StockHistoricalDataClient.
+
+    Raises RuntimeError if credentials are not available.
+    """
+    api_key, secret_key = get_alpaca_credentials()
+    if not api_key or not secret_key:
+        raise RuntimeError(
+            "No Alpaca API credentials found. "
+            "Set ALPACA_KAIROS_KEY / ALPACA_KAIROS_SECRET or similar env vars."
+        )
+    return StockHistoricalDataClient(api_key, secret_key)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Data Fetching
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
 def resolve_tickers(spec: str) -> List[str]:
     """Resolve a ticker spec string to a list of ticker symbols.
 
     Args:
         spec: One of:
-            - "core" → CORE_TICKERS (8 tickers)
-            - "all" → union of all trader tickers (30+ tickers)
-            - "AAPL,MSFT,NVDA" → literal comma-separated list
+            - "core" -> CORE_TICKERS (8 tickers)
+            - "all" -> union of all trader tickers (30+ tickers)
+            - "AAPL,MSFT,NVDA" -> literal comma-separated list
     """
     if spec.lower() == "core":
         return sorted(CORE_TICKERS)
@@ -122,7 +180,7 @@ def missing_date_range(
     end_date = today
     start_date = today - timedelta(days=days + 1)
 
-    # Generate all expected dates (calendar days — yfinance handles non-trading)
+    # Generate all expected dates (calendar days — Alpaca handles non-trading)
     expected = set()
     d = start_date
     while d <= end_date:
@@ -134,6 +192,84 @@ def missing_date_range(
         return None, None
 
     return start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")
+
+
+def fetch_bars_alpaca(
+    client: StockHistoricalDataClient,
+    ticker: str,
+    start: str,
+    end: str,
+) -> Optional[pd.DataFrame]:
+    """Fetch 5-min OHLCV bars from Alpaca.
+
+    Args:
+        client: Alpaca StockHistoricalDataClient instance.
+        ticker: Symbol (e.g. "AAPL")
+        start: Start date string "YYYY-MM-DD"
+        end: End date string "YYYY-MM-DD"
+
+    Returns:
+        DataFrame with columns [timestamp, open, high, low, close, volume]
+        or None if no data available.
+    """
+    try:
+        req = StockBarsRequest(
+            symbol_or_symbols=ticker,
+            timeframe=ALPACA_TIMEFRAME,
+            start=start,
+            end=end,
+        )
+        resp = client.get_stock_bars(req)
+
+        if ticker not in resp.data or not resp.data[ticker]:
+            return None
+
+        bars_data = resp.data[ticker]
+
+        # Convert to DataFrame
+        rows = []
+        for bar in bars_data:
+            rows.append({
+                "timestamp": bar.timestamp,
+                "open": float(bar.open),
+                "high": float(bar.high),
+                "low": float(bar.low),
+                "close": float(bar.close),
+                "volume": int(bar.volume),
+            })
+
+        if not rows:
+            return None
+
+        df = pd.DataFrame(rows)
+
+        # Ensure UTC timezone
+        if df["timestamp"].dt.tz is None:
+            df["timestamp"] = df["timestamp"].dt.tz_localize("UTC")
+        else:
+            df["timestamp"] = df["timestamp"].dt.tz_convert("UTC")
+
+        # Drop rows with all-NaN OHLCV
+        df = df.dropna(subset=["open", "high", "low", "close"])
+
+        # Ensure dtypes
+        df["open"] = df["open"].astype(float)
+        df["high"] = df["high"].astype(float)
+        df["low"] = df["low"].astype(float)
+        df["close"] = df["close"].astype(float)
+        df["volume"] = df["volume"].fillna(0).astype("float64")
+
+        df = df.sort_values("timestamp").reset_index(drop=True)
+        return df
+
+    except Exception as e:
+        print(f"  ERROR fetching {ticker} from Alpaca: {e}", file=sys.stderr)
+        return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Indicator Computation
+# ═══════════════════════════════════════════════════════════════════════════════
 
 
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -162,13 +298,9 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
             df["macd_signal"] = pd.to_numeric(macd_df.iloc[:, 1], errors="coerce").astype("float64")
             df["macd_hist"] = pd.to_numeric(macd_df.iloc[:, 2], errors="coerce").astype("float64")
         else:
-            df["macd"] = pd.array([float("nan")] * len(df), dtype="float64")
-            df["macd_signal"] = pd.array([float("nan")] * len(df), dtype="float64")
-            df["macd_hist"] = pd.array([float("nan")] * len(df), dtype="float64")
+            _fill_nan_cols(df, ["macd", "macd_signal", "macd_hist"])
     except Exception:
-        df["macd"] = pd.array([float("nan")] * len(df), dtype="float64")
-        df["macd_signal"] = pd.array([float("nan")] * len(df), dtype="float64")
-        df["macd_hist"] = pd.array([float("nan")] * len(df), dtype="float64")
+        _fill_nan_cols(df, ["macd", "macd_signal", "macd_hist"])
 
     # ATR(14)
     try:
@@ -180,87 +312,15 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def fetch_bars(ticker: str, start: str, end: str) -> Optional[pd.DataFrame]:
-    """Fetch 5-min OHLCV bars from Yahoo Finance.
+def _fill_nan_cols(df: pd.DataFrame, cols: List[str]) -> None:
+    """Set list of columns to NaN-filled float64."""
+    for col in cols:
+        df[col] = pd.Series([float("nan")] * len(df), dtype="float64")
 
-    Args:
-        ticker: Symbol (e.g. "AAPL")
-        start: Start date string "YYYY-MM-DD"
-        end: End date string "YYYY-MM-DD"
 
-    Returns:
-        DataFrame with columns [timestamp, open, high, low, close, volume]
-        or None if no data available.
-    """
-    try:
-        df = yf.download(
-            ticker,
-            start=start,
-            end=end,
-            interval=INTERVAL,
-            progress=False,
-            auto_adjust=True,
-        )
-
-        if df is None or df.empty:
-            return None
-
-        # yfinance returns multi-level columns; flatten them
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.droplevel(1)
-
-        # Reset index to get timestamp as a column
-        df = df.reset_index()
-
-        # yfinance may use "Datetime" or "Date" as the column name
-        ts_col = "Datetime" if "Datetime" in df.columns else "Date"
-        if ts_col not in df.columns and "timestamp" not in df.columns:
-            # Try the first column
-            ts_col = df.columns[0]
-
-        # Rename columns to match our schema
-        rename_map = {}
-        if ts_col in df.columns:
-            rename_map[ts_col] = "timestamp"
-        for col in df.columns:
-            cl = col.lower()
-            if cl in ("open", "high", "low", "close", "volume"):
-                rename_map[col] = cl
-
-        df = df.rename(columns=rename_map)
-
-        # Ensure required columns exist
-        required = {"timestamp", "open", "high", "low", "close", "volume"}
-        if not required.issubset(set(df.columns)):
-            missing_cols = required - set(df.columns)
-            print(f"  WARNING: {ticker} missing columns: {missing_cols}", file=sys.stderr)
-            return None
-
-        # Keep only required columns
-        df = df[["timestamp", "open", "high", "low", "close", "volume"]].copy()
-
-        # Ensure UTC timezone
-        if df["timestamp"].dt.tz is None:
-            df["timestamp"] = df["timestamp"].dt.tz_localize("UTC")
-        else:
-            df["timestamp"] = df["timestamp"].dt.tz_convert("UTC")
-
-        # Drop rows with all-NaN OHLCV
-        df = df.dropna(subset=["open", "high", "low", "close"])
-
-        # Ensure dtypes
-        df["open"] = df["open"].astype(float)
-        df["high"] = df["high"].astype(float)
-        df["low"] = df["low"].astype(float)
-        df["close"] = df["close"].astype(float)
-        df["volume"] = df["volume"].fillna(0).astype("float64")
-
-        df = df.sort_values("timestamp").reset_index(drop=True)
-        return df
-
-    except Exception as e:
-        print(f"  ERROR fetching {ticker}: {e}", file=sys.stderr)
-        return None
+# ═══════════════════════════════════════════════════════════════════════════════
+# Parquet Storage (idempotent, atomic)
+# ═══════════════════════════════════════════════════════════════════════════════
 
 
 def merge_and_dedup(
@@ -317,7 +377,13 @@ def atomic_write(df: pd.DataFrame, final_path: Path) -> None:
         raise
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# Backfill Orchestration
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
 def backfill_ticker(
+    client: StockHistoricalDataClient,
     ticker: str,
     days: int,
     force: bool = False,
@@ -326,7 +392,16 @@ def backfill_ticker(
 ) -> Tuple[str, str, int]:
     """Backfill a single ticker.
 
-    Returns: (ticker, status, bar_count)
+    Args:
+        client: Alpaca StockHistoricalDataClient.
+        ticker: Stock symbol.
+        days: Number of calendar days to backfill.
+        force: Force re-fetch even if data exists.
+        check_only: Dry-run, don't fetch.
+        verbose: Verbose output.
+
+    Returns:
+        (ticker, status, bar_count)
         status: "ok", "skipped", "empty", "error"
         bar_count: number of bars fetched (0 if skipped/empty/error)
     """
@@ -367,9 +442,9 @@ def backfill_ticker(
             return ticker, "gaps", len(missing)
 
     if verbose:
-        print(f"  {ticker}: fetching {start_str} → {end_str}...")
+        print(f"  {ticker}: fetching {start_str} -> {end_str}...")
 
-    new_df = fetch_bars(ticker, start_str, end_str)
+    new_df = fetch_bars_alpaca(client, ticker, start_str, end_str)
 
     if new_df is None or new_df.empty:
         print(f"  {ticker}: no data returned", file=sys.stderr)
@@ -392,7 +467,7 @@ def backfill_ticker(
     new_count = len(new_df)
     total_count = len(merged)
     if verbose:
-        print(f"  {ticker}: {new_count} new bars → {total_count} total "
+        print(f"  {ticker}: {new_count} new bars -> {total_count} total "
               f"({len(merged['timestamp'].dt.date.unique())} dates)")
 
     return ticker, "ok", new_count
@@ -400,7 +475,7 @@ def backfill_ticker(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Backfill historical 5-min OHLCV bars via Yahoo Finance"
+        description="Backfill historical 5-min OHLCV bars via Alpaca API"
     )
     parser.add_argument(
         "--tickers",
@@ -433,13 +508,25 @@ def main():
     args = parser.parse_args()
 
     tickers = resolve_tickers(args.tickers)
+    if not tickers:
+        print("ERROR: No tickers resolved from spec.", file=sys.stderr)
+        sys.exit(1)
+
+    # ── Alpaca credentials ────────────────────────────────────────────────
+    try:
+        client = create_alpaca_client()
+    except RuntimeError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        print("Run: source .env && python3 scripts/backfill_bars.py --tickers core --days 20", file=sys.stderr)
+        sys.exit(1)
 
     print(f"\n{'='*60}")
     mode = "CHECK (dry-run)" if args.check else "BACKFILL"
-    print(f"  {mode} — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"  {mode} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"  Tickers: {', '.join(tickers)}")
     print(f"  Days:    {args.days}")
     print(f"  Force:   {args.force}")
+    print(f"  Source:  Alpaca API (paper trading)")
     print(f"  Output:  {BARS_DIR}")
     print(f"{'='*60}\n")
 
@@ -449,6 +536,7 @@ def main():
 
     for i, ticker in enumerate(tickers):
         ticker_name, status, bar_count = backfill_ticker(
+            client,
             ticker,
             days=args.days,
             force=args.force,
@@ -466,27 +554,27 @@ def main():
 
     # ── Summary ───────────────────────────────────────────────────────────────
     print(f"\n{'='*60}")
-    print(f"  SUMMARY — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"  SUMMARY - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"  Elapsed: {elapsed:.1f}s")
     print(f"{'='*60}")
 
     if args.check:
         total_gaps = sum(1 for s in results.get("gaps", []))
         ok_clean = len(results.get("ok", []))
-        print(f"  ✓ No gaps:  {ok_clean} tickers")
-        print(f"  ⚠ Has gaps: {total_gaps} tickers")
-        for ticker in results.get("gaps", []):
-            exist_dates = existing_dates(ticker)
-            start_s, end_s = missing_date_range(ticker, args.days, existing=exist_dates)
+        print(f"  {'OK':<2} No gaps:  {ok_clean} tickers")
+        print(f"  {'Gaps':<2} Has gaps: {total_gaps} tickers")
+        for t in results.get("gaps", []):
+            exist_dates_set = existing_dates(t)
+            start_s, end_s = missing_date_range(t, args.days, existing=exist_dates_set)
             if start_s:
-                print(f"      {ticker}: needs {start_s} → {end_s}")
+                print(f"      {t}: needs {start_s} -> {end_s}")
     else:
-        print(f"  ✓ Fetched: {len(results.get('ok', []))} tickers ({total_bars:,} new bars)")
-        print(f"  ⏭ Skipped: {len(results.get('skipped', []))} tickers (fully covered)")
+        print(f"  {'OK':<2} Fetched: {len(results.get('ok', []))} tickers ({total_bars:,} new bars)")
+        print(f"  {'SKIP':<2} Skipped: {len(results.get('skipped', []))} tickers (fully covered)")
         if results.get("empty"):
-            print(f"  ⚠ Empty:   {len(results['empty'])} tickers ({', '.join(results['empty'])})")
+            print(f"  {'EMPTY':<2} Empty:   {len(results['empty'])} tickers ({', '.join(results['empty'])})")
         if results.get("error"):
-            print(f"  ✗ Errors:  {len(results['error'])} tickers ({', '.join(results['error'])})")
+            print(f"  {'ERR':<2} Errors:  {len(results['error'])} tickers ({', '.join(results['error'])})")
 
         # Show cache stats
         total_size = 0
@@ -500,7 +588,7 @@ def main():
             size_str = f"{total_size / 1_000:.1f} KB"
         else:
             size_str = f"{total_size} B"
-        print(f"\n  💾 Cache:  {file_count} parquet files, {size_str}")
+        print(f"\n  {'CACHE':<2} Cache:  {file_count} parquet files, {size_str}")
 
     print()
 

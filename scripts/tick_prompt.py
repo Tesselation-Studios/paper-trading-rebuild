@@ -360,12 +360,31 @@ def assemble_prompt(trader_id: str, db_path: str | None = None) -> str:
 
 REMEMBER: thesis MUST be 20+ chars, signals_used MUST have at least 1 entry,
 confidence >= 0.3. A HOLD with idle cash is a missed learning opportunity.
+REMEMBER: rationale MUST be 10+ chars for BUY/SELL, conviction ranges 0.0-1.0.
+A HOLD with idle cash is a missed learning opportunity.
 """.strip()
 
     return injected
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
+
+def run_learning_loop(trader_id: str) -> None:
+    """Run the learning loop for the given trader after prompt assembly."""
+    import subprocess
+    agent_id = f"trader-{trader_id}"
+    print(f"\n[tick_prompt] Running learning loop for {agent_id}...", file=sys.stderr)
+    result = subprocess.run(
+        [sys.executable, "-m", "src.learning_loop", "--agent", agent_id],
+        capture_output=True, text=True,
+        cwd=str(Path(__file__).resolve().parent.parent),
+        timeout=120,
+    )
+    if result.returncode == 0:
+        print(f"[tick_prompt] Learning loop OK for {agent_id}", file=sys.stderr)
+    else:
+        print(f"[tick_prompt] Learning loop FAILED for {agent_id}: {result.stderr[-200:]}", file=sys.stderr)
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -386,6 +405,10 @@ def main():
     parser.add_argument(
         "--json", action="store_true",
         help="Output as JSON (for programmatic use)"
+    )
+    parser.add_argument(
+        "--run-learning-loop", action="store_true",
+        help="Run learning loop analysis after prompt assembly (post-tick grade/analyze/synthesize)",
     )
     args = parser.parse_args()
 
@@ -408,6 +431,10 @@ def main():
         print(json.dumps({"prompt": prompt}))
     else:
         print(prompt)
+
+    # Post-tick: run learning loop to grade and analyze results
+    if args.run_learning_loop:
+        run_learning_loop(args.trader)
 
 
 if __name__ == "__main__":

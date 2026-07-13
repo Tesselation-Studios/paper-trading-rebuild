@@ -130,9 +130,29 @@ def compute_summary(positions: list[dict]) -> dict:
     }
 
 
+def run_learning_loop(agent_id: str) -> None:
+    """Run the learning loop for the given agent after tick prep."""
+    import subprocess
+    print(f"\n[tick_prep] Running learning loop for {agent_id}...", file=sys.stderr)
+    result = subprocess.run(
+        [sys.executable, "-m", "src.learning_loop", "--agent", agent_id],
+        capture_output=True, text=True,
+        cwd=str(Path(__file__).resolve().parent.parent),
+        timeout=120,
+    )
+    if result.returncode == 0:
+        print(f"[tick_prep] Learning loop OK for {agent_id}", file=sys.stderr)
+    else:
+        print(f"[tick_prep] Learning loop FAILED for {agent_id}: {result.stderr[-200:]}", file=sys.stderr)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Tick prep for trader cron")
     parser.add_argument("--agent", required=True, help="Agent ID (trader-kairos, trader-stonks, trader-aldridge)")
+    parser.add_argument(
+        "--run-learning-loop", action="store_true",
+        help="Run learning loop analysis after tick prep (post-tick grade/analyze/synthesize)",
+    )
     args = parser.parse_args()
 
     positions = get_positions(args.agent)
@@ -150,6 +170,10 @@ def main():
     }
 
     print(json.dumps(output, indent=2, default=str))
+
+    # Post-tick: run learning loop to grade and analyze results
+    if args.run_learning_loop:
+        run_learning_loop(args.agent)
 
 
 if __name__ == "__main__":
