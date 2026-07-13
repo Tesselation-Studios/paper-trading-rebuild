@@ -342,39 +342,31 @@ def _get_benchmark_data() -> dict:
             if not conn:
                 return data
 
-            # Latest SPY/QQQ close prices from market_data.bars
+            # Latest prices
             for ticker in ["SPY", "QQQ"]:
-                cur = conn.execute(
-                    "SELECT close FROM market_data.bars WHERE ticker = %s ORDER BY timestamp DESC LIMIT 1",
+                row = conn.execute(
+                    "SELECT close_price FROM benchmarks WHERE ticker = %s ORDER BY date DESC LIMIT 1",
                     (ticker,),
-                )
-                row = cur.fetchone()
+                ).fetchone()
                 if row:
                     key = ticker.lower()
-                    data[key] = {"price": round(float(row["close"]), 2)}
+                    data[key] = {"price": round(float(row["close_price"]), 2)}
 
-            # Benchmark comparisons (table doesn't exist yet — compute from equity_snapshots)
-            for aid in ["trader-kairos", "trader-aldridge", "trader-stonks"]:
-                try:
-                    spy_price = data["spy"]["price"] if data.get("spy") else None
-                    # Compare vs latest equity snapshot
-                    cur = conn.execute(
-                        """SELECT equity FROM equity_snapshots
-                           WHERE trader_id = %s ORDER BY date DESC LIMIT 1""",
-                        (aid,),
-                    )
-                    row = cur.fetchone()
-                    if row and spy_price:
-                        data["comparisons"][aid] = {
-                            "agent_return": round(float(row["equity"] / 10000.0 - 1), 4),
-                            "spy_return": round(spy_price / 530.0 - 1, 4),  # rough baseline
-                            "qqq_return": None,
-                            "spy_excess": None,
-                            "period_start": None,
-                            "period_end": None,
-                        }
-                except Exception:
-                    pass
+            # Agent benchmark comparisons
+            for row in conn.execute(
+                """SELECT * FROM agent_benchmark_comparison
+                   ORDER BY agent_id, period_start DESC"""
+            ).fetchall():
+                aid = row["agent_id"]
+                if aid not in data["comparisons"]:
+                    data["comparisons"][aid] = {
+                        "agent_return": row["agent_return"],
+                        "spy_return": row["spy_return"],
+                        "qqq_return": row["qqq_return"],
+                        "spy_excess": row["spy_excess"],
+                        "period_start": str(row["period_start"]) if row["period_start"] else None,
+                        "period_end": str(row["period_end"]) if row["period_end"] else None,
+                    }
     except Exception:
         pass
     return data
@@ -1564,6 +1556,511 @@ def api_findings():
         "count": len(results),
         "trader_filter": trader or "all",
     })
+
+
+# ── API: /api/virtual-traders ────────────────────────────────────────────
+
+@app.route("/api/virtual-traders")
+def api_virtual_traders():
+    """
+    Return all virtual traders with their params, P&L, configs.
+    Aggregates trade P&L from executed_trades/virtual_traders/trades tables.
+    """
+    result = []
+    with _db() as conn:
+        if not conn:
+            return jsonify({"virtual_traders": [], "updated_at": datetime.now().isoformat()})
+        try:
+            rows = conn.execute(
+                """SELECT v.id, v.name, v.base_trader, v.variant_type, v.config, v.status,
+                          v.created_at, v.culled_at, v.wins
+                   FROM trading.virtual_traders v
+                   ORDER BY v.base_trader, v.created_at DESC"""
+            ).fetchall()
+            for r in rows:
+                config = r["config"]
+                if isinstance(config, str):
+                    try:
+                        config = json.loads(config)
+                    except Exception:
+                        config = {}
+                # Compute total P&L from trades with this virtual trader name
+                total_pnl = None
+                total_trades = 0
+                try:
+                    pnl_cur = conn.execute(
+                        """SELECT COUNT(*) as cnt, COALESCE(SUM(t.pnl),0) as total_pnl
+                           FROM trading.trades t
+                           WHERE t.trade_source = 'virtual'
+                             AND t.strategy = %s
+                             AND t.agent_id = %s""",
+                        (r["name"], f"trader-{r['base_trader']}"),
+                    )
+                    pnl_row = pnl_cur.fetchone()
+                    if pnl_row:
+                        total_trades = pnl_row["cnt"] or 0
+                        total_pnl = round(float(pnl_row["total_pnl"] or 0), 2)
+                except Exception:
+                    pass
+
+                result.append({
+                    "id": r["id"],
+                    "name": r["name"],
+                    "base_trader": r["base_trader"],
+                    "variant_type": r["variant_type"],
+                    "config": config,
+                    "status": r["status"],
+                    "wins": r["wins"] or 0,
+                    "total_trades": total_trades,
+                    "total_pnl": total_pnl,
+                    "created_at": str(r["created_at"]) if r["created_at"] else None,
+                    "culled_at": str(r["culled_at"]) if r["culled_at"] else None,
+                })
+        except Exception as e:
+            return jsonify({"error": str(e), "virtual_traders": []}), 500
+
+    return jsonify({
+        "virtual_traders": result,
+        "count": len(result),
+        "updated_at": datetime.now().isoformat(),
+    })
+
+
+# ── API: /api/virtual-trader/<name> ─────────────────────────────────
+
+@app.route("/api/virtual-trader/<path:name>")
+def api_virtual_trader_detail(name):
+    """Return full detail for a single virtual trader including recent trades."""
+    result = None
+    trades = []
+    with _db() as conn:
+        if not conn:
+            return jsonify({"error": "DB unavailable"}), 503
+        try:
+            row = conn.execute(
+                """SELECT v.id, v.name, v.base_trader, v.variant_type, v.config,
+                          v.status, v.created_at, v.culled_at, v.wins
+                   FROM trading.virtual_traders v WHERE v.name = %s""",
+                (name,),
+            ).fetchone()
+            if row:
+                config = row["config"]
+                if isinstance(config, str):
+                    try:
+                        config = json.loads(config)
+                    except Exception:
+                        config = {}
+                result = {
+                    "id": row["id"],
+                    "name": row["name"],
+                    "base_trader": row["base_trader"],
+                    "variant_type": row["variant_type"],
+                    "config": config,
+                    "status": row["status"],
+                    "wins": row["wins"] or 0,
+                    "created_at": str(row["created_at"]) if row["created_at"] else None,
+                    "culled_at": str(row["culled_at"]) if row["culled_at"] else None,
+                }
+                # Recent trades
+                tcur = conn.execute(
+                    """SELECT t.id, t.timestamp, t.ticker, t.action, t.quantity,
+                              t.price, t.pnl, t.status
+                       FROM trading.trades t
+                       WHERE t.trade_source = 'virtual'
+                         AND t.strategy = %s
+                       ORDER BY t.timestamp DESC LIMIT 50""",
+                    (name,),
+                )
+                for t in tcur.fetchall():
+                    trades.append({
+                        "id": t["id"],
+                        "timestamp": str(t["timestamp"]) if t["timestamp"] else None,
+                        "ticker": t["ticker"],
+                        "action": t["action"],
+                        "quantity": t["quantity"],
+                        "price": float(t["price"]) if t["price"] else None,
+                        "pnl": float(t["pnl"]) if t["pnl"] else None,
+                        "status": t["status"],
+                    })
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+    if not result:
+        return jsonify({"error": "Virtual trader not found"}), 404
+    return jsonify({"virtual_trader": result, "trades": trades})
+
+
+# ── API: /api/trader-files/<trader_id> ──────────────────────────────
+
+@app.route("/api/trader-files/<trader_id>")
+def api_trader_files(trader_id):
+    """
+    Return AGENTS.md, SOUL.md, TOOLS.md, HEARTBEAT.md for a base trader.
+    Looks in both agents/ and trading-agent-prompts/ directories.
+    Returns file contents keyed by filename.
+    """
+    files_map = {}
+    # Normalize trader_id: strip 'trader-' prefix if present
+    tid = trader_id.replace("trader-", "")
+
+    # Search paths in priority order
+    search_paths = [
+        ROOT / "agents" / f"trader-{tid}",
+        Path.home() / "projects" / "trading-agent-prompts" / tid,
+        Path.home() / "projects" / "trading-agent-prompts" / f"trader-{tid}",
+        ROOT / "agents" / tid,
+    ]
+
+    filenames = ["AGENTS.md", "SOUL.md", "TOOLS.md", "HEARTBEAT.md", "IDENTITY.md", "MEMORY.md"]
+
+    for base in search_paths:
+        if not base.exists():
+            continue
+        for fn in filenames:
+            fp = base / fn
+            if fp.exists() and fn not in files_map:
+                try:
+                    content = fp.read_text()
+                    files_map[fn] = {
+                        "filename": fn,
+                        "content": content,
+                        "size": len(content),
+                        "path": str(fp.relative_to(base.parent) if fp.is_relative_to(base.parent) else fp),
+                        "mtime": datetime.fromtimestamp(fp.stat().st_mtime).isoformat(),
+                    }
+                except Exception:
+                    pass
+
+    return jsonify({
+        "trader_id": trader_id,
+        "files": files_map,
+        "count": len(files_map),
+    })
+
+
+# ── API: /api/eval-results ──────────────────────────────────────────
+
+@app.route("/api/eval-results")
+def api_eval_results():
+    """
+    Return multi-timeframe evaluation results for all traders.
+    Timeframes: 1d, 5d, 20d, 90d performance windows.
+    Sources: agent_benchmark_comparison, portfolio_snapshots, agent_profile.
+    """
+    from datetime import timedelta
+
+    timeframes = {
+        "1d": timedelta(days=1),
+        "5d": timedelta(days=5),
+        "20d": timedelta(days=20),
+        "90d": timedelta(days=90),
+    }
+
+    result = {}
+    with _db() as conn:
+        if not conn:
+            return jsonify({"error": "DB unavailable"}), 503
+        try:
+            # Get all available agent IDs from our trader meta
+            for meta in TRADER_META:
+                agent_id = f"trader-{meta['id']}"
+                tf_data = {}
+                for tf_name, delta in timeframes.items():
+                    try:
+                        s_cur = conn.execute(
+                            """SELECT timestamp, portfolio_value, cash
+                               FROM portfolio_snapshots
+                               WHERE trader_id = %s
+                                 AND timestamp >= NOW() - %s::interval
+                               ORDER BY timestamp ASC""",
+                            (agent_id, tf_name),
+                        )
+                        snapshots = s_cur.fetchall()
+                        if snapshots:
+                            start_val = float(snapshots[0]["portfolio_value"])
+                            end_val = float(snapshots[-1]["portfolio_value"])
+                            ret = round((end_val - start_val) / start_val * 100, 2) if start_val else 0
+                            tf_data[tf_name] = {
+                                "return_pct": ret,
+                                "start_value": round(start_val, 2),
+                                "end_value": round(end_val, 2),
+                                "start_date": str(snapshots[0]["timestamp"]),
+                                "end_date": str(snapshots[-1]["timestamp"]),
+                                "snapshots_count": len(snapshots),
+                            }
+                        else:
+                            tf_data[tf_name] = {"return_pct": None, "reason": "No data"}
+                    except Exception as e:
+                        tf_data[tf_name] = {"return_pct": None, "error": str(e)}
+
+                # Win rates per timeframe from trades
+                try:
+                    wr_cur = conn.execute(
+                        """SELECT COUNT(*) as total,
+                                  SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins
+                           FROM trading.trades
+                           WHERE agent_id = %s
+                             AND timestamp >= NOW() - INTERVAL '90 days'
+                             AND pnl IS NOT NULL""",
+                        (agent_id,),
+                    )
+                    wr_row = wr_cur.fetchone()
+                    total_90d = wr_row["total"] or 0
+                    wins_90d = wr_row["wins"] or 0
+                    win_rate_90d = round(wins_90d / total_90d, 4) if total_90d > 0 else None
+                except Exception:
+                    total_90d = 0
+                    wins_90d = 0
+                    win_rate_90d = None
+
+                result[meta["id"]] = {
+                    "name": meta["name"],
+                    "manager": meta["manager"],
+                    "timeframes": tf_data,
+                    "90d_wins": wins_90d,
+                    "90d_total_trades": total_90d,
+                    "90d_win_rate": win_rate_90d,
+                }
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+    return jsonify({"results": result, "timeframes": list(timeframes.keys())})
+
+
+# ── API: /api/git-branches ──────────────────────────────────────────
+
+GIT_REPOS = [
+    ("paper-trading-rebuild", ROOT),
+    ("trading-agent-prompts", Path.home() / "projects" / "trading-agent-prompts"),
+]
+
+@app.route("/api/git-branches")
+def api_git_branches():
+    """
+    Return git branches for tracked repos, with recent commit metrics.
+    Shows which branches are running and their activity.
+    """
+    repos = []
+    for name, repo_path in GIT_REPOS:
+        if not repo_path.exists() or not (repo_path / ".git").exists():
+            continue
+        try:
+            import subprocess
+            # Get branches and their last commit info
+            branches = []
+            result = subprocess.run(
+                ["git", "branch", "-a"],
+                capture_output=True, text=True, timeout=5,
+                cwd=str(repo_path),
+            )
+            for line in result.stdout.splitlines():
+                line = line.strip()
+                is_current = line.startswith("* ")
+                branch_name = line.replace("* ", "").strip()
+                if not branch_name:
+                    continue
+                # Get last commit info for this branch
+                try:
+                    log_res = subprocess.run(
+                        ["git", "log", branch_name, "-1",
+                         "--format=%H|%ai|%s"],
+                        capture_output=True, text=True, timeout=5,
+                        cwd=str(repo_path),
+                    )
+                    commit_info = log_res.stdout.strip().split("|") if log_res.stdout else []
+                    hash_val = commit_info[0][:12] if len(commit_info) > 0 else ""
+                    date_val = commit_info[1] if len(commit_info) > 1 else ""
+                    msg_val = commit_info[2][:80] if len(commit_info) > 2 else ""
+                except Exception:
+                    hash_val = ""
+                    date_val = ""
+                    msg_val = ""
+
+                branches.append({
+                    "name": branch_name,
+                    "current": is_current,
+                    "last_commit_hash": hash_val,
+                    "last_commit_date": date_val,
+                    "last_commit_msg": msg_val,
+                })
+
+            # Get current branch
+            try:
+                cur_res = subprocess.run(
+                    ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                    capture_output=True, text=True, timeout=5,
+                    cwd=str(repo_path),
+                )
+                current_branch = cur_res.stdout.strip()
+            except Exception:
+                current_branch = ""
+
+            # Get recent commits on main/master
+            recent_commits = []
+            try:
+                log_res = subprocess.run(
+                    ["git", "log", "--oneline", "-10", "--no-decorate"],
+                    capture_output=True, text=True, timeout=5,
+                    cwd=str(repo_path),
+                )
+                for line in log_res.stdout.splitlines():
+                    parts = line.strip().split(" ", 1)
+                    if len(parts) == 2:
+                        recent_commits.append({
+                            "hash": parts[0],
+                            "message": parts[1],
+                        })
+            except Exception:
+                pass
+
+            repos.append({
+                "name": name,
+                "path": str(repo_path),
+                "current_branch": current_branch,
+                "branches": branches,
+                "branch_count": len(branches),
+                "recent_commits": recent_commits,
+            })
+        except Exception as e:
+            repos.append({"name": name, "error": str(e)})
+
+    return jsonify({"repos": repos})
+
+
+# ── API: /api/correlations ──────────────────────────────────────────
+
+@app.route("/api/correlations")
+def api_correlations():
+    """
+    Return prompt changes ↔ performance outcome correlations.
+    Sources: prompt_sweep results, prompt_versioning table, prompt_tiering changes.
+    Shows which prompt changes led to positive/negative performance shifts.
+    """
+    correlations = []
+    sweep_results = []
+    version_history = []
+
+    with _db() as conn:
+        if not conn:
+            return jsonify({"correlations": [], "sweep_results": []})
+        try:
+            # 1. Sweep results from prompt_sweep runs
+            try:
+                cur = conn.execute(
+                    """SELECT id, prompt_version, variant_name, trader_id,
+                              pnl_change_pct, win_rate_change, sharpe_change,
+                              timestamp, sweep_run_id
+                       FROM trading.prompt_sweep_results
+                       ORDER BY timestamp DESC LIMIT 50"""
+                )
+                for r in cur.fetchall():
+                    sweep_results.append({
+                        "id": r["id"],
+                        "prompt_version": r["prompt_version"],
+                        "variant_name": r["variant_name"],
+                        "trader_id": r["trader_id"],
+                        "pnl_change_pct": round(float(r["pnl_change_pct"]), 2) if r["pnl_change_pct"] else None,
+                        "win_rate_change": round(float(r["win_rate_change"]), 4) if r["win_rate_change"] else None,
+                        "sharpe_change": round(float(r["sharpe_change"]), 2) if r["sharpe_change"] else None,
+                        "timestamp": str(r["timestamp"]) if r["timestamp"] else None,
+                        "sweep_run_id": r["sweep_run_id"],
+                    })
+            except Exception:
+                pass
+
+            # 2. Prompt version history
+            try:
+                cur = conn.execute(
+                    """SELECT id, trader_id, version, diff_summary, performance_before,
+                              performance_after, applied_at
+                       FROM trading.prompt_versions
+                       ORDER BY applied_at DESC LIMIT 50"""
+                )
+                for r in cur.fetchall():
+                    version_history.append({
+                        "id": r["id"],
+                        "trader_id": r["trader_id"],
+                        "version": r["version"],
+                        "diff_summary": r["diff_summary"],
+                        "performance_before": r["performance_before"],
+                        "performance_after": r["performance_after"],
+                        "applied_at": str(r["applied_at"]) if r["applied_at"] else None,
+                    })
+            except Exception:
+                pass
+
+            # 3. Build correlation insights from sweep data
+            if sweep_results:
+                # Group by prompt_version
+                version_pnl = {}
+                for r in sweep_results:
+                    ver = r["prompt_version"] or "unknown"
+                    if ver not in version_pnl:
+                        version_pnl[ver] = {"pnl_changes": [], "win_rate_changes": [], "count": 0}
+                    if r["pnl_change_pct"] is not None:
+                        version_pnl[ver]["pnl_changes"].append(r["pnl_change_pct"])
+                    if r["win_rate_change"] is not None:
+                        version_pnl[ver]["win_rate_changes"].append(r["win_rate_change"])
+                    version_pnl[ver]["count"] += 1
+
+                for ver, data in sorted(version_pnl.items(), key=lambda x: x[1]["count"], reverse=True):
+                    avg_pnl = round(sum(data["pnl_changes"]) / len(data["pnl_changes"]), 2) if data["pnl_changes"] else None
+                    avg_wr = round(sum(data["win_rate_changes"]) / len(data["win_rate_changes"]) * 100, 2) if data["win_rate_changes"] else None
+                    correlations.append({
+                        "prompt_version": ver,
+                        "test_count": data["count"],
+                        "avg_pnl_change_pct": avg_pnl,
+                        "avg_win_rate_change_pct": avg_wr,
+                        "direction": "improvement" if (avg_pnl or 0) > 0 else ("regression" if (avg_pnl or 0) < 0 else "neutral"),
+                        "samples": data["pnl_changes"][:5],  # first 5 raw samples
+                    })
+
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+    return jsonify({
+        "correlations": correlations,
+        "sweep_results": sweep_results,
+        "version_history": version_history,
+    })
+
+
+# ── API: /api/promote-virtual ────────────────
+
+@app.route("/api/promote-virtual/<int:virtual_id>", methods=["POST"])
+def api_promote_virtual(virtual_id):
+    """Promote a virtual trader to live: copy its config to the base trader."""
+    with _db() as conn:
+        if not conn:
+            return jsonify({"error": "DB unavailable"}), 503
+        try:
+            row = conn.execute(
+                "SELECT name, base_trader, variant_type, config FROM trading.virtual_traders WHERE id = %s",
+                (virtual_id,),
+            ).fetchone()
+            if not row:
+                return jsonify({"error": "Virtual trader not found"}), 404
+
+            config = row["config"]
+            if isinstance(config, str):
+                config = json.loads(config)
+
+            trader_id = f"trader-{row['base_trader']}"
+            # Log promotion to rotation_log
+            conn.execute(
+                """INSERT INTO trading.rotation_log
+                   (date, base_trader, live_virtual, reason)
+                   VALUES (CURRENT_DATE, %s, %s, 'promoted via dashboard')""",
+                (row["base_trader"], row["name"]),
+            )
+            # Mark virtual as promoted
+            conn.execute(
+                "UPDATE trading.virtual_traders SET status = 'promoted' WHERE id = %s",
+                (virtual_id,),
+            )
+            return jsonify({"success": True, "message": f"Promoted {row['name']} to live trader {trader_id}"})
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
 
 
 # ── static frontend ───────────────────────────────────────────────────────────

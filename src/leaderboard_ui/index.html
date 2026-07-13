@@ -100,6 +100,419 @@ header {
 .status-dot.stale { background: var(--yellow); }
 .status-dot.error { background: var(--red); animation: none; }
 
+/* ── Navigation Tabs ─────────────────────────────────────────────── */
+.nav-tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 20px;
+  overflow-x: auto;
+}
+
+.nav-tab {
+  padding: 8px 16px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  cursor: pointer;
+  border: 1px solid transparent;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.nav-tab:hover {
+  color: var(--text);
+  background: var(--surface2);
+  border-color: var(--border) var(--border) transparent;
+}
+
+.nav-tab.active {
+  color: var(--blue);
+  border-color: var(--border) var(--border) var(--blue);
+  background: var(--surface);
+}
+
+.nav-tab .tab-count {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 0 5px;
+  font-size: 10px;
+  background: var(--surface2);
+  border-radius: 8px;
+  color: var(--muted);
+}
+
+.nav-tab.active .tab-count {
+  background: var(--blue);
+  color: #fff;
+}
+
+/* ── Tab content sections ────────────────────────────────────────── */
+.tab-content {
+  display: none;
+}
+
+.tab-content.active {
+  display: block;
+}
+
+/* ── Virtual Trader Cards ────────────────────────────────────────── */
+.virtual-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.virtual-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+
+.virtual-card:hover { border-color: var(--blue); }
+
+.virtual-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.virtual-card-name {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.virtual-card-base {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.virtual-card-pnl {
+  font-size: 16px;
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+
+.virtual-card-pnl.positive { color: var(--green); }
+.virtual-card-pnl.negative { color: var(--red); }
+.virtual-card-pnl.neutral  { color: var(--muted); }
+
+.virtual-card-meta {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 10px;
+  color: var(--muted);
+  margin-top: 6px;
+}
+
+.virtual-card-config {
+  margin-top: 8px;
+  padding: 6px 8px;
+  background: var(--surface2);
+  border-radius: 4px;
+  font-size: 11px;
+  font-family: 'JetBrains Mono', 'Consolas', monospace;
+  color: var(--muted);
+  max-height: 60px;
+  overflow: hidden;
+}
+
+/* ── Trader File Viewer ──────────────────────────────────────────── */
+.file-viewer-grid {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  gap: 12px;
+  min-height: 400px;
+}
+
+@media (max-width: 900px) {
+  .file-viewer-grid { grid-template-columns: 1fr; }
+}
+
+.file-list {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+}
+
+.file-list-item {
+  padding: 6px 10px;
+  font-size: 11px;
+  color: var(--muted);
+  cursor: pointer;
+  border-radius: 4px;
+  margin-bottom: 2px;
+  transition: background 0.1s, color 0.1s;
+}
+
+.file-list-item:hover {
+  background: var(--surface2);
+  color: var(--text);
+}
+
+.file-list-item.active {
+  background: rgba(88,166,255,0.15);
+  color: var(--blue);
+  font-weight: 600;
+}
+
+.file-preview {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+  overflow: auto;
+  max-height: 600px;
+  font-size: 12px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text);
+}
+
+.file-preview-loading {
+  color: var(--muted);
+  font-style: italic;
+}
+
+/* ── Eval Results Table ──────────────────────────────────────────── */
+.eval-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 12px;
+}
+
+.eval-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px;
+  position: relative;
+  overflow: hidden;
+}
+
+.eval-card::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 3px;
+}
+
+.eval-card.kairos::before   { background: var(--kairos); }
+.eval-card.aldridge::before { background: var(--aldridge); }
+.eval-card.stonks::before   { background: var(--stonks); }
+
+.eval-card-title {
+  font-size: 13px;
+  font-weight: 700;
+  margin-bottom: 10px;
+}
+
+.eval-timeframe-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.eval-timeframe-box {
+  background: var(--surface2);
+  border-radius: 6px;
+  padding: 8px 10px;
+  text-align: center;
+}
+
+.eval-timeframe-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  text-transform: uppercase;
+  margin-bottom: 2px;
+}
+
+.eval-timeframe-value {
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.eval-timeframe-value.positive { color: var(--green); }
+.eval-timeframe-value.negative { color: var(--red); }
+.eval-timeframe-value.neutral  { color: var(--muted); }
+
+/* ── Git Branch Viewer ───────────────────────────────────────────── */
+.git-repo-section {
+  margin-bottom: 20px;
+}
+
+.git-repo-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 8px;
+}
+
+.git-branch-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.git-branch-table th {
+  text-align: left;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  text-transform: uppercase;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.git-branch-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+}
+
+.git-branch-table tr:last-child td { border-bottom: none; }
+
+.git-branch-current {
+  display: inline-block;
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 10px;
+  background: rgba(88,166,255,0.15);
+  color: var(--blue);
+  font-weight: 600;
+}
+
+.git-branch-hash {
+  font-family: 'JetBrains Mono', 'Consolas', monospace;
+  font-size: 10px;
+  color: var(--muted);
+}
+
+/* ── Correlation Table ───────────────────────────────────────────── */
+.correlation-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.correlation-table th {
+  text-align: left;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  text-transform: uppercase;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.correlation-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+}
+
+.correlation-table tr:last-child td { border-bottom: none; }
+
+.correlation-improvement { color: var(--green); }
+.correlation-regression  { color: var(--red); }
+.correlation-neutral     { color: var(--muted); }
+
+/* ── Promote button ──────────────────────────────────────────────── */
+.btn-promote {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  background: rgba(63,185,80,0.15);
+  color: var(--green);
+  border: 1px solid rgba(63,185,80,0.3);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.btn-promote:hover {
+  background: rgba(63,185,80,0.3);
+}
+
+.btn-promote:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ── Virtual trader detail modal additions ──────────────────────── */
+.vt-detail-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.vt-trade-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.vt-trade-table th {
+  text-align: left;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  text-transform: uppercase;
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+.vt-trade-table td {
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+}
+
+/* ── Trader file selector bar ───────────────────────────────────── */
+.trader-selector {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.trader-selector .pill {
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+.trader-selector .pill.active {
+  opacity: 1;
+  border-width: 2px;
+}
+
+.trader-selector .pill:not(.active) {
+  opacity: 0.5;
+}
+
 @keyframes pulse-dot {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.4; }
@@ -892,78 +1305,155 @@ section { margin-bottom: 20px; }
 <main>
   <div class="container">
 
-    <!-- ── Trader Cards ──────────────────────────────────────────── -->
-    <div id="traders-grid" class="traders-grid">
-      <div class="trader-card skeleton" style="height:200px"></div>
-      <div class="trader-card skeleton" style="height:200px"></div>
-      <div class="trader-card skeleton" style="height:200px"></div>
+    <!-- ── Navigation Tabs ──────────────────────────────────────── -->
+    <div class="nav-tabs" id="nav-tabs">
+      <div class="nav-tab active" data-tab="dashboard" onclick="switchTab('dashboard')">📊 Dashboard</div>
+      <div class="nav-tab" data-tab="virtual-traders" onclick="switchTab('virtual-traders')">🤖 Virtual Traders</div>
+      <div class="nav-tab" data-tab="trader-files" onclick="switchTab('trader-files')">📄 Trader Files</div>
+      <div class="nav-tab" data-tab="eval-results" onclick="switchTab('eval-results')">📈 Eval Results</div>
+      <div class="nav-tab" data-tab="git-branches" onclick="switchTab('git-branches')">🌿 Git Branches</div>
+      <div class="nav-tab" data-tab="correlations" onclick="switchTab('correlations')">🔗 Correlations</div>
     </div>
 
-    <!-- ── Activity + Journal ────────────────────────────────────── -->
-    <div class="split-row">
-      <div class="panel scrollable">
-        <div class="section-title">Recent Decisions</div>
-        <div id="activity-feed" class="activity-list">
-          <div class="empty-state">Loading...</div>
+    <!-- ════════════════════════════════════════════════════════════ -->
+    <!-- TAB: Dashboard (existing content)                          -->
+    <!-- ════════════════════════════════════════════════════════════ -->
+    <div id="tab-dashboard" class="tab-content active">
+
+      <!-- ── Trader Cards ────────────────────────────────────────── -->
+      <div id="traders-grid" class="traders-grid">
+        <div class="trader-card skeleton" style="height:200px"></div>
+        <div class="trader-card skeleton" style="height:200px"></div>
+        <div class="trader-card skeleton" style="height:200px"></div>
+      </div>
+
+      <!-- ── Activity + Journal ──────────────────────────────────── -->
+      <div class="split-row">
+        <div class="panel scrollable">
+          <div class="section-title">Recent Decisions</div>
+          <div id="activity-feed" class="activity-list">
+            <div class="empty-state">Loading...</div>
+          </div>
+          <div class="section-title" style="margin-top:12px;font-size:11px;color:var(--red)">⛔ Risk Gate Vetoes (last 10)</div>
+          <div id="veto-feed" class="activity-list">
+            <div style="color:var(--muted);font-size:11px;padding:4px 0">Loading...</div>
+          </div>
         </div>
-        <div class="section-title" style="margin-top:12px;font-size:11px;color:var(--red)">⛔ Risk Gate Vetoes (last 10)</div>
-        <div id="veto-feed" class="activity-list">
-          <div style="color:var(--muted);font-size:11px;padding:4px 0">Loading...</div>
+        <div class="panel scrollable">
+          <div class="section-title">Journal</div>
+          <div id="journal-feed" class="journal-list">
+            <div class="empty-state">Loading...</div>
+          </div>
         </div>
       </div>
-      <div class="panel scrollable">
-        <div class="section-title">Journal</div>
-        <div id="journal-feed" class="journal-list">
-          <div class="empty-state">Loading...</div>
+
+      <!-- ── Signals + Watchlists ────────────────────────────────── -->
+      <div class="split-row even">
+        <div class="panel">
+          <div class="section-title">ML Signals</div>
+          <div id="signals-container">
+            <div class="empty-state">Loading...</div>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="section-title">Watchlists</div>
+          <div id="watchlists-container">
+            <div class="empty-state">Loading...</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Options Chain ─────────────────────────────────------ -->
+      <section>
+        <div class="panel">
+          <div class="section-title">Options Chain</div>
+          <div id="options-container">
+            <div class="empty-state">Loading options data...</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── Options Positions ─────────────────────────────────-- -->
+      <section>
+        <div class="panel">
+          <div class="section-title">Options Positions <span id="options-pos-count"></span></div>
+          <div id="options-positions-container">
+            <div class="empty-state">Loading...</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── Trader Thoughts ─────────────────────────────────---- -->
+      <section>
+        <div class="panel">
+          <div class="section-title">Trader Thoughts</div>
+          <div id="trader-thoughts" class="thoughts-grid">
+            <div class="empty-state">Loading...</div>
+          </div>
+        </div>
+      </section>
+
+    </div>
+
+    <!-- ════════════════════════════════════════════════════════════ -->
+    <!-- TAB: Virtual Traders                                        -->
+    <!-- ════════════════════════════════════════════════════════════ -->
+    <div id="tab-virtual-traders" class="tab-content">
+      <div class="section-title">Virtual Traders <span class="tab-count" id="vt-count"></span></div>
+      <div id="virtual-grid" class="virtual-grid">
+        <div class="empty-state" style="grid-column:1/-1">Loading...</div>
+      </div>
+    </div>
+
+    <!-- ════════════════════════════════════════════════════════════ -->
+    <!-- TAB: Trader Files                                           -->
+    <!-- ════════════════════════════════════════════════════════════ -->
+    <div id="tab-trader-files" class="tab-content">
+      <div class="section-title">Per-Trader Files — AGENTS.md, SOUL.md, TOOLS.md, HEARTBEAT.md</div>
+      <div class="trader-selector" id="trader-file-selector">
+        <span class="pill kairos active" data-trader="kairos" onclick="selectFileTrader('kairos')">Kairós Capital</span>
+        <span class="pill aldridge" data-trader="aldridge" onclick="selectFileTrader('aldridge')">Aldridge & Partners</span>
+        <span class="pill stonks" data-trader="stonks" onclick="selectFileTrader('stonks')">Stonks Capital</span>
+      </div>
+      <div class="file-viewer-grid" id="file-viewer-grid">
+        <div class="file-list" id="file-list">
+          <div class="empty-state" style="padding:12px">Select a trader to view files</div>
+        </div>
+        <div class="file-preview" id="file-preview">
+          <div class="file-preview-loading">Select a file to preview</div>
         </div>
       </div>
     </div>
 
-    <!-- ── Signals + Watchlists ──────────────────────────────────── -->
-    <div class="split-row even">
-      <div class="panel">
-        <div class="section-title">ML Signals</div>
-        <div id="signals-container">
-          <div class="empty-state">Loading...</div>
-        </div>
-      </div>
-      <div class="panel">
-        <div class="section-title">Watchlists</div>
-        <div id="watchlists-container">
-          <div class="empty-state">Loading...</div>
-        </div>
+    <!-- ════════════════════════════════════════════════════════════ -->
+    <!-- TAB: Eval Results                                           -->
+    <!-- ════════════════════════════════════════════════════════════ -->
+    <div id="tab-eval-results" class="tab-content">
+      <div class="section-title">Multi-Timeframe Evaluation — 1d / 5d / 20d / 90d Performance</div>
+      <div id="eval-grid" class="eval-grid">
+        <div class="empty-state" style="grid-column:1/-1">Loading...</div>
       </div>
     </div>
 
-    <!-- ── Options Chain ───────────────────────────────────────── -->
-    <section>
-      <div class="panel">
-        <div class="section-title">Options Chain</div>
-        <div id="options-container">
-          <div class="empty-state">Loading options data...</div>
-        </div>
+    <!-- ════════════════════════════════════════════════════════════ -->
+    <!-- TAB: Git Branches                                           -->
+    <!-- ════════════════════════════════════════════════════════════ -->
+    <div id="tab-git-branches" class="tab-content">
+      <div class="section-title">Git Branches — Running Branches & Activity</div>
+      <div id="git-branches-container">
+        <div class="empty-state">Loading...</div>
       </div>
-    </section>
+    </div>
 
-    <!-- ── Options Positions ───────────────────────────────────── -->
-    <section>
-      <div class="panel">
-        <div class="section-title">Options Positions <span id="options-pos-count"></span></div>
-        <div id="options-positions-container">
-          <div class="empty-state">Loading...</div>
-        </div>
+    <!-- ════════════════════════════════════════════════════════════ -->
+    <!-- TAB: Correlations                                           -->
+    <!-- ════════════════════════════════════════════════════════════ -->
+    <div id="tab-correlations" class="tab-content">
+      <div class="section-title">Prompt Changes ↔ Performance Correlations</div>
+      <div id="correlations-container">
+        <div class="empty-state">Loading...</div>
       </div>
-    </section>
-
-    <!-- ── Trader Thoughts ─────────────────────────────────────── -->
-    <section>
-      <div class="panel">
-        <div class="section-title">Trader Thoughts</div>
-        <div id="trader-thoughts" class="thoughts-grid">
-          <div class="empty-state">Loading...</div>
-        </div>
-      </div>
-    </section>
+    </div>
 
   </div>
 </main>
@@ -1937,7 +2427,539 @@ function agentColor(agentId) {
   return '';
 }
 
-// ── Kick off ──────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+// TAB SWITCHING
+// ══════════════════════════════════════════════════════════════════════
+
+function switchTab(tabName) {
+  // Update nav tabs
+  document.querySelectorAll('.nav-tab').forEach(tab => {
+    tab.classList.toggle('active', tab.dataset.tab === tabName);
+  });
+  // Update content
+  document.querySelectorAll('.tab-content').forEach(tc => {
+    tc.classList.toggle('active', tc.id === 'tab-' + tabName);
+  });
+
+  // Lazy-load tab content
+  if (tabName === 'virtual-traders') {
+    fetchVirtualTraders();
+  } else if (tabName === 'trader-files') {
+    fetchTraderFiles('kairos');
+  } else if (tabName === 'eval-results') {
+    fetchEvalResults();
+  } else if (tabName === 'git-branches') {
+    fetchGitBranches();
+  } else if (tabName === 'correlations') {
+    fetchCorrelations();
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// VIRTUAL TRADERS
+// ══════════════════════════════════════════════════════════════════════
+
+async function fetchVirtualTraders() {
+  const el = document.getElementById('virtual-grid');
+  const countEl = document.getElementById('vt-count');
+  el.innerHTML = '<div class="empty-state" style="grid-column:1/-1">Loading...</div>';
+
+  try {
+    const data = await apiFetch('/api/virtual-traders');
+    const vts = data.virtual_traders || [];
+
+    if (countEl) countEl.textContent = '(' + vts.length + ')';
+
+    if (!vts.length) {
+      el.innerHTML = '<div class="empty-state" style="grid-column:1/-1">No virtual traders configured yet.</div>';
+      return;
+    }
+
+    // Group by base_trader
+    const grouped = {};
+    const order = ['kairos', 'aldridge', 'stonks'];
+    for (const vt of vts) {
+      const base = vt.base_trader || 'other';
+      if (!grouped[base]) grouped[base] = [];
+      grouped[base].push(vt);
+    }
+
+    let html = '';
+    for (const base of order) {
+      const list = grouped[base] || [];
+      if (!list.length) continue;
+
+      const traderNames = { kairos: 'Kairós Capital', aldridge: 'Aldridge & Partners', stonks: 'Stonks Capital' };
+      html += `<div style="margin-bottom:16px">
+        <div class="section-title" style="margin-bottom:8px">${traderNames[base] || base}</div>
+        <div class="virtual-grid">`;
+
+      for (const vt of list) {
+        const pnlClass = vt.total_pnl == null ? 'neutral' : vt.total_pnl >= 0 ? 'positive' : 'negative';
+        const statusPill = vt.status === 'active'
+          ? '<span class="pill buy" style="font-size:9px">ACTIVE</span>'
+          : '<span class="pill veto" style="font-size:9px">' + escHtml(vt.status.toUpperCase()) + '</span>';
+        const configStr = vt.config ? JSON.stringify(vt.config).substring(0, 100) : '';
+
+        html += `<div class="virtual-card" onclick="openVirtualDetail('${escHtml(vt.name)}')">
+          <div class="virtual-card-header">
+            <span class="virtual-card-name">${escHtml(vt.name)}</span>
+            ${statusPill}
+          </div>
+          <div class="virtual-card-base">${escHtml(vt.variant_type)} variant · ${vt.total_trades} trades · ${vt.wins}W</div>
+          <div class="virtual-card-pnl ${pnlClass}">
+            ${vt.total_pnl != null ? '$' + vt.total_pnl.toFixed(2) : '—'}
+          </div>
+          <div class="virtual-card-meta">
+            <span>Created: ${vt.created_at || '—'}</span>
+            ${vt.culled_at ? '<span>Culled: ' + vt.culled_at + '</span>' : ''}
+            ${vt.status === 'active' ? `<span class="btn-promote" onclick="event.stopPropagation();promoteVirtual(${vt.id}, '${escHtml(vt.name)}')">⬆ Promote to Live</span>` : ''}
+          </div>
+          <div class="virtual-card-config">${escHtml(configStr)}</div>
+        </div>`;
+      }
+
+      html += '</div></div>';
+    }
+
+    el.innerHTML = html;
+  } catch (err) {
+    console.error('Virtual traders error:', err);
+    el.innerHTML = '<div class="empty-state" style="grid-column:1/-1;color:var(--red)">Error loading virtual traders</div>';
+  }
+}
+
+async function openVirtualDetail(name) {
+  try {
+    const data = await apiFetch('/api/virtual-trader/' + encodeURIComponent(name));
+    const vt = data.virtual_trader;
+    const trades = data.trades || [];
+    if (!vt) return;
+
+    const content = `
+      <div class="modal-trader-label">VIRTUAL TRADER</div>
+      <div class="modal-trader-name">${escHtml(vt.name)}</div>
+      <div class="modal-trader-manager">Base: ${escHtml(vt.base_trader)} · ${escHtml(vt.variant_type)} variant · ${vt.status}</div>
+
+      <div class="vt-detail-grid">
+        <div class="modal-stat">
+          <div class="modal-stat-label">Total P&L</div>
+          <div class="modal-stat-value ${vt.total_pnl >= 0 ? 'positive' : 'negative'}">$${(vt.total_pnl || 0).toFixed(2)}</div>
+        </div>
+        <div class="modal-stat">
+          <div class="modal-stat-label">Wins</div>
+          <div class="modal-stat-value" style="color:var(--green)">${vt.wins}</div>
+        </div>
+        <div class="modal-stat">
+          <div class="modal-stat-label">Trades</div>
+          <div class="modal-stat-value">${trades.length}</div>
+        </div>
+        <div class="modal-stat">
+          <div class="modal-stat-label">Created</div>
+          <div class="modal-stat-value" style="font-size:14px;color:var(--muted)">${vt.created_at || '—'}</div>
+        </div>
+      </div>
+
+      <div class="modal-section">
+        <div class="modal-section-title">Config</div>
+        <pre style="background:var(--surface2);padding:8px;border-radius:4px;font-size:11px;color:var(--muted);overflow:auto">${escHtml(JSON.stringify(vt.config, null, 2))}</pre>
+      </div>
+
+      <div class="modal-section">
+        <div class="modal-section-title">Recent Trades (${trades.length})</div>
+        ${trades.length
+          ? `<div style="max-height:300px;overflow-y:auto"><table class="vt-trade-table">
+              <thead><tr>
+                <th>Time</th>
+                <th>Ticker</th>
+                <th>Action</th>
+                <th>Qty</th>
+                <th>Price</th>
+                <th>P&L</th>
+              </tr></thead>
+              <tbody>
+                ${trades.slice(0, 30).map(t => {
+                  const plClass = t.pnl >= 0 ? 'positive' : 'negative';
+                  return `<tr>
+                    <td style="font-size:10px;color:var(--muted)">${t.timestamp ? fmtTime(t.timestamp) : '—'}</td>
+                    <td><strong>${escHtml(t.ticker)}</strong></td>
+                    <td><span class="pill ${(t.action||'hold').toLowerCase()}">${t.action}</span></td>
+                    <td>${t.quantity || '—'}</td>
+                    <td>${t.price != null ? '$' + t.price.toFixed(2) : '—'}</td>
+                    <td class="${plClass}">${t.pnl != null ? '$' + t.pnl.toFixed(2) : '—'}</td>
+                  </tr>`;
+                }).join('')}
+              </tbody>
+            </table></div>`
+          : '<div class="modal-no-positions">No trades yet</div>'
+        }
+      </div>
+    `;
+
+    document.getElementById('modal-content').innerHTML = content;
+    document.getElementById('trader-modal').classList.add('open');
+    document.body.style.overflow = 'hidden';
+  } catch (err) {
+    console.error('Virtual detail error:', err);
+  }
+}
+
+async function promoteVirtual(id, name) {
+  if (!confirm('Promote "' + name + '" to live trader? This will apply its config to the base trader.')) return;
+  try {
+    const r = await fetch('/api/promote-virtual/' + id, { method: 'POST' });
+    const data = await r.json();
+    if (data.success) {
+      fetchVirtualTraders();
+    } else {
+      alert('Promotion failed: ' + (data.error || 'unknown'));
+    }
+  } catch (err) {
+    alert('Error: ' + err.message);
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// TRADER FILES (AGENTS, SOUL, TOOLS, HEARTBEAT)
+// ══════════════════════════════════════════════════════════════════════
+
+let selectedFileTrader = 'kairos';
+let cachedFileData = {};
+
+function selectFileTrader(traderId) {
+  selectedFileTrader = traderId;
+  document.querySelectorAll('#trader-file-selector .pill').forEach(p => {
+    p.classList.toggle('active', p.dataset.trader === traderId);
+  });
+  fetchTraderFiles(traderId);
+}
+
+async function fetchTraderFiles(traderId) {
+  const listEl = document.getElementById('file-list');
+  const previewEl = document.getElementById('file-preview');
+  listEl.innerHTML = '<div class="empty-state" style="padding:12px">Loading...</div>';
+  previewEl.innerHTML = '<div class="file-preview-loading">Loading file list...</div>';
+
+  try {
+    const data = await apiFetch('/api/trader-files/' + encodeURIComponent(traderId));
+    const files = data.files || {};
+    cachedFileData = files;
+
+    const fileOrder = ['AGENTS.md', 'SOUL.md', 'HEARTBEAT.md', 'TOOLS.md', 'IDENTITY.md', 'MEMORY.md'];
+    const fileNames = fileOrder.filter(fn => files[fn]);
+
+    if (!fileNames.length) {
+      listEl.innerHTML = '<div class="empty-state" style="padding:12px">No files found for this trader</div>';
+      previewEl.innerHTML = '<div class="file-preview-loading">No files available</div>';
+      return;
+    }
+
+    listEl.innerHTML = fileNames.map((fn, i) => {
+      const f = files[fn];
+      return `<div class="file-list-item ${i === 0 ? 'active' : ''}" onclick="showFilePreview('${fn}')">
+        ${escHtml(fn)}
+        <span style="display:block;font-size:9px;color:var(--muted)">${(f.size || 0).toLocaleString()} bytes</span>
+      </div>`;
+    }).join('');
+
+    // Show first file
+    if (fileNames.length > 0) {
+      showFilePreview(fileNames[0]);
+    }
+  } catch (err) {
+    console.error('Trader files error:', err);
+    listEl.innerHTML = '<div class="empty-state" style="padding:12px;color:var(--red)">Error loading files</div>';
+    previewEl.innerHTML = '';
+  }
+}
+
+function showFilePreview(filename) {
+  const previewEl = document.getElementById('file-preview');
+  const fileData = cachedFileData[filename];
+
+  // Highlight active file
+  document.querySelectorAll('.file-list-item').forEach(item => {
+    item.classList.toggle('active', item.textContent.trim().startsWith(filename));
+  });
+
+  if (!fileData) {
+    previewEl.innerHTML = '<div class="file-preview-loading">File not found</div>';
+    return;
+  }
+
+  previewEl.innerHTML = escHtml(fileData.content);
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// EVAL RESULTS (multi-timeframe)
+// ══════════════════════════════════════════════════════════════════════
+
+async function fetchEvalResults() {
+  const el = document.getElementById('eval-grid');
+  el.innerHTML = '<div class="empty-state" style="grid-column:1/-1">Loading...</div>';
+
+  try {
+    const data = await apiFetch('/api/eval-results');
+    const results = data.results || {};
+    const timeframes = data.timeframes || ['1d', '5d', '20d', '90d'];
+
+    const entries = Object.entries(results);
+    if (!entries.length) {
+      el.innerHTML = '<div class="empty-state" style="grid-column:1/-1">No evaluation data available yet.</div>';
+      return;
+    }
+
+    el.innerHTML = entries.map(([traderId, trader]) => {
+      const tfs = trader.timeframes || {};
+      const traderColor = traderId;
+
+      return `<div class="eval-card ${traderColor}">
+        <div class="eval-card-title" style="color:var(--${traderColor})">${escHtml(trader.name)}</div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:10px">${escHtml(trader.manager)}</div>
+
+        <div class="eval-timeframe-grid">
+          ${timeframes.map(tf => {
+            const tfData = tfs[tf] || {};
+            const ret = tfData.return_pct;
+            const valClass = ret == null ? 'neutral' : ret >= 0 ? 'positive' : 'negative';
+            const errorOrReason = tfData.error || tfData.reason || '';
+            return `<div class="eval-timeframe-box">
+              <div class="eval-timeframe-label">${tf}</div>
+              <div class="eval-timeframe-value ${valClass}">
+                ${ret != null ? (ret >= 0 ? '+' : '') + ret.toFixed(2) + '%' : '—'}
+              </div>
+              ${errorOrReason ? `<div style="font-size:9px;color:var(--muted)">${errorOrReason}</div>` : ''}
+              ${tfData.snapshots_count ? `<div style="font-size:9px;color:var(--muted)">${tfData.snapshots_count} snapshots</div>` : ''}
+            </div>`;
+          }).join('')}
+        </div>
+
+        ${trader['90d_win_rate'] != null
+          ? `<div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);font-size:11px;color:var(--muted)">
+               90d Win Rate: <span class="positive">${(trader['90d_win_rate'] * 100).toFixed(1)}%</span>
+               (${trader['90d_wins']}W / ${trader['90d_total_trades']}T)
+             </div>`
+          : ''}
+      </div>`;
+    }).join('');
+  } catch (err) {
+    console.error('Eval results error:', err);
+    el.innerHTML = '<div class="empty-state" style="grid-column:1/-1;color:var(--red)">Error loading evaluation results</div>';
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// GIT BRANCHES
+// ══════════════════════════════════════════════════════════════════════
+
+async function fetchGitBranches() {
+  const el = document.getElementById('git-branches-container');
+  el.innerHTML = '<div class="empty-state">Loading...</div>';
+
+  try {
+    const data = await apiFetch('/api/git-branches');
+    const repos = data.repos || [];
+
+    if (!repos.length) {
+      el.innerHTML = '<div class="empty-state">No git repositories found.</div>';
+      return;
+    }
+
+    el.innerHTML = repos.map(repo => {
+      const branches = repo.branches || [];
+      const recent = repo.recent_commits || [];
+
+      return `<div class="git-repo-section">
+        <div class="git-repo-title">📁 ${escHtml(repo.name)}</div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:8px">
+          Current branch: <span class="git-branch-current">${escHtml(repo.current_branch || '—')}</span>
+          · ${repo.branch_count} branches
+        </div>
+
+        ${branches.length
+          ? `<table class="git-branch-table">
+              <thead><tr>
+                <th>Branch</th>
+                <th>Last Commit</th>
+                <th>Date</th>
+                <th>Message</th>
+              </tr></thead>
+              <tbody>
+                ${branches.map(b => {
+                  const isCurrent = b.current;
+                  const branchName = escHtml(b.name);
+                  const commitDate = b.last_commit_date ? b.last_commit_date.slice(0, 16).replace('T', ' ') : '—';
+                  return `<tr>
+                    <td>
+                      ${isCurrent ? '<span class="git-branch-current">✓</span> ' : ''}
+                      ${branchName}
+                    </td>
+                    <td class="git-branch-hash">${b.last_commit_hash || '—'}</td>
+                    <td style="font-size:10px;color:var(--muted)">${commitDate}</td>
+                    <td style="font-size:11px;color:var(--muted);max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(b.last_commit_msg || '')}">${escHtml(b.last_commit_msg || '')}</td>
+                  </tr>`;
+                }).join('')}
+              </tbody>
+            </table>`
+          : '<div style="font-size:11px;color:var(--muted)">No branches found</div>'
+        }
+
+        ${recent.length
+          ? `<div style="margin-top:8px">
+              <div style="font-size:10px;font-weight:600;letter-spacing:0.06em;color:var(--muted);text-transform:uppercase;margin-bottom:4px">Recent Commits</div>
+              <div style="font-size:11px">
+                ${recent.map(c => `<div style="padding:2px 0"><span class="git-branch-hash">${c.hash}</span> ${escHtml(c.message)}</div>`).join('')}
+              </div>
+            </div>`
+          : ''
+        }
+      </div>`;
+    }).join('');
+  } catch (err) {
+    console.error('Git branches error:', err);
+    el.innerHTML = '<div class="empty-state" style="color:var(--red)">Error loading git branches</div>';
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// CORRELATIONS (prompt changes ↔ performance)
+// ══════════════════════════════════════════════════════════════════════
+
+async function fetchCorrelations() {
+  const el = document.getElementById('correlations-container');
+  el.innerHTML = '<div class="empty-state">Loading...</div>';
+
+  try {
+    const data = await apiFetch('/api/correlations');
+    const correlations = data.correlations || [];
+    const sweepResults = data.sweep_results || [];
+    const versionHistory = data.version_history || [];
+
+    let html = '';
+
+    // Correlation summary
+    html += '<div class="panel" style="margin-bottom:16px">';
+    html += '<div class="section-title">Prompt Version ↔ Performance Correlations</div>';
+
+    if (correlations.length) {
+      html += `<table class="correlation-table">
+        <thead><tr>
+          <th>Prompt Version</th>
+          <th>Tests</th>
+          <th>Avg P&L Δ</th>
+          <th>Avg Win Rate Δ</th>
+          <th>Direction</th>
+        </tr></thead>
+        <tbody>
+          ${correlations.map(c => {
+            const dirClass = 'correlation-' + c.direction;
+            return `<tr>
+              <td style="font-family:monospace;font-size:11px">${escHtml(c.prompt_version)}</td>
+              <td>${c.test_count}</td>
+              <td class="${c.avg_pnl_change_pct >= 0 ? 'positive' : 'negative'}">
+                ${c.avg_pnl_change_pct != null ? (c.avg_pnl_change_pct >= 0 ? '+' : '') + c.avg_pnl_change_pct.toFixed(2) + '%' : '—'}
+              </td>
+              <td class="${c.avg_win_rate_change_pct >= 0 ? 'positive' : 'negative'}">
+                ${c.avg_win_rate_change_pct != null ? (c.avg_win_rate_change_pct >= 0 ? '+' : '') + c.avg_win_rate_change_pct.toFixed(2) + '%' : '—'}
+              </td>
+              <td class="${dirClass}">${c.direction.toUpperCase()}</td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>`;
+    } else {
+      html += '<div class="empty-state">No correlation data yet. Run prompt sweeps to generate data.</div>';
+    }
+    html += '</div>';
+
+    // Sweep results table
+    html += '<div class="panel" style="margin-bottom:16px">';
+    html += '<div class="section-title">Recent Sweep Results</div>';
+    if (sweepResults.length) {
+      html += `<table class="correlation-table">
+        <thead><tr>
+          <th>Variant</th>
+          <th>Trader</th>
+          <th>P&L Δ</th>
+          <th>Win Rate Δ</th>
+          <th>Sharpe Δ</th>
+          <th>Time</th>
+        </tr></thead>
+        <tbody>
+          ${sweepResults.slice(0, 25).map(r => {
+            return `<tr>
+              <td style="font-family:monospace;font-size:11px">${escHtml(r.variant_name || '—')}</td>
+              <td>${escHtml(r.trader_id || '—')}</td>
+              <td class="${r.pnl_change_pct >= 0 ? 'positive' : 'negative'}">${r.pnl_change_pct != null ? (r.pnl_change_pct >= 0 ? '+' : '') + r.pnl_change_pct.toFixed(2) + '%' : '—'}</td>
+              <td class="${r.win_rate_change >= 0 ? 'positive' : 'negative'}">${r.win_rate_change != null ? (r.win_rate_change >= 0 ? '+' : '') + (r.win_rate_change * 100).toFixed(2) + '%' : '—'}</td>
+              <td class="${r.sharpe_change >= 0 ? 'positive' : 'negative'}">${r.sharpe_change != null ? (r.sharpe_change >= 0 ? '+' : '') + r.sharpe_change.toFixed(2) : '—'}</td>
+              <td style="font-size:10px;color:var(--muted)">${r.timestamp ? r.timestamp.slice(0, 16) : '—'}</td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>`;
+    } else {
+      html += '<div class="empty-state">No sweep results yet.</div>';
+    }
+    html += '</div>';
+
+    // Version history
+    html += '<div class="panel">';
+    html += '<div class="section-title">Prompt Version History</div>';
+    if (versionHistory.length) {
+      html += `<table class="correlation-table">
+        <thead><tr>
+          <th>Version</th>
+          <th>Trader</th>
+          <th>Diff Summary</th>
+          <th>Applied</th>
+        </tr></thead>
+        <tbody>
+          ${versionHistory.slice(0, 20).map(v => {
+            return `<tr>
+              <td style="font-family:monospace;font-size:11px">${escHtml(v.version || '—')}</td>
+              <td>${escHtml(v.trader_id || '—')}</td>
+              <td style="font-size:11px;color:var(--muted);max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(v.diff_summary || '')}">${escHtml(v.diff_summary || '—')}</td>
+              <td style="font-size:10px;color:var(--muted)">${v.applied_at ? v.applied_at.slice(0, 16) : '—'}</td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>`;
+    } else {
+      html += '<div class="empty-state">No version history yet.</div>';
+    }
+    html += '</div>';
+
+    el.innerHTML = html;
+  } catch (err) {
+    console.error('Correlations error:', err);
+    el.innerHTML = '<div class="empty-state" style="color:var(--red)">Error loading correlation data</div>';
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// OVERRIDE: augment fetchAll to also refresh current tab data
+// ══════════════════════════════════════════════════════════════════════
+
+// Preserve original fetchAll
+const _origFetchAll = fetchAll;
+fetchAll = function() {
+  _origFetchAll();
+  // Refresh the active tab's data on poll
+  const activeTab = document.querySelector('.nav-tab.active');
+  if (activeTab) {
+    const tabName = activeTab.dataset.tab;
+    if (tabName === 'virtual-traders') fetchVirtualTraders();
+    else if (tabName === 'trader-files' && selectedFileTrader) fetchTraderFiles(selectedFileTrader);
+    else if (tabName === 'eval-results') fetchEvalResults();
+    else if (tabName === 'git-branches') fetchGitBranches();
+    else if (tabName === 'correlations') fetchCorrelations();
+  }
+};
+
+// ══════════════════════════════════════════════════════════════════════
+// Kick off
+// ══════════════════════════════════════════════════════════════════════
 
 fetchAll();
 setInterval(fetchAll, POLL_INTERVAL);
