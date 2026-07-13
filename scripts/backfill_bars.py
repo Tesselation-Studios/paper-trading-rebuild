@@ -34,8 +34,6 @@ BARS_DIR.mkdir(parents=True, exist_ok=True)
 
 # ── Dependencies ─────────────────────────────────────────────────────────────
 import pandas as pd
-import pandas_ta as ta  # noqa: E402
-import yfinance as yf  # noqa: E402
 
 # ── Ticker groups ────────────────────────────────────────────────────────────
 CORE_TICKERS: List[str] = [
@@ -73,14 +71,7 @@ ATR_LENGTH = 14
 
 
 def resolve_tickers(spec: str) -> List[str]:
-    """Resolve a ticker spec string to a list of ticker symbols.
-
-    Args:
-        spec: One of:
-            - "core" → CORE_TICKERS (8 tickers)
-            - "all" → union of all trader tickers (30+ tickers)
-            - "AAPL,MSFT,NVDA" → literal comma-separated list
-    """
+    """Resolve a ticker spec string to a list of ticker symbols."""
     if spec.lower() == "core":
         return sorted(CORE_TICKERS)
     if spec.lower() == "all":
@@ -88,8 +79,16 @@ def resolve_tickers(spec: str) -> List[str]:
         for tickers in TRADER_TICKERS.values():
             all_set.update(tickers)
         return sorted(all_set)
-    # Comma-separated literal list
     return sorted([t.strip().upper() for t in spec.split(",") if t.strip()])
+
+
+# ── Lazy pandas_ta / yfinance import (may not be available on older Python) ──
+_has_pandas_ta: bool = False
+try:
+    import pandas_ta as ta  # noqa: E402
+    _has_pandas_ta = True
+except ImportError:
+    ta = None  # type: ignore[assignment]
 
 
 def existing_dates(ticker: str) -> Set[str]:
@@ -137,12 +136,11 @@ def missing_date_range(
 
 
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """Add RSI(14), MACD(12,26,9), and ATR(14) columns to a bars DataFrame.
-
-    The input DataFrame must have columns: open, high, low, close, volume.
-    Returns the DataFrame with added columns: rsi_14, macd, macd_signal,
-    macd_hist, atr_14.
-    """
+    """Add RSI(14), MACD(12,26,9), and ATR(14) columns to a bars DataFrame."""
+    if not _has_pandas_ta:
+        for col in ["rsi_14", "macd", "macd_signal", "macd_hist", "atr_14"]:
+            df[col] = float("nan")
+        return df
     closes = df["close"]
     highs = df["high"]
     lows = df["low"]
@@ -181,17 +179,8 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def fetch_bars(ticker: str, start: str, end: str) -> Optional[pd.DataFrame]:
-    """Fetch 5-min OHLCV bars from Yahoo Finance.
-
-    Args:
-        ticker: Symbol (e.g. "AAPL")
-        start: Start date string "YYYY-MM-DD"
-        end: End date string "YYYY-MM-DD"
-
-    Returns:
-        DataFrame with columns [timestamp, open, high, low, close, volume]
-        or None if no data available.
-    """
+    """Fetch 5-min OHLCV bars from Yahoo Finance."""
+    import yfinance as yf  # lazy import
     try:
         df = yf.download(
             ticker,
