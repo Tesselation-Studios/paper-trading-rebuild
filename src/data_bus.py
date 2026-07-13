@@ -54,7 +54,7 @@ import signal
 import threading
 import argparse
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FutureTimeoutError
 from typing import Dict, List, Optional, Any, Set, Tuple
@@ -6165,6 +6165,705 @@ def _run_hmm_retrain():
         log.error(f'[retrain-hmm] Error: {e}')
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# API Discovery — list all available endpoints
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/discover")
+def discover():
+    """
+    GET /discover — list all available API endpoints with descriptions and params.
+
+    Returns a JSON object where each key is an endpoint path and each value
+    contains the HTTP method, description, and required/optional parameters.
+    External consumers should use this as their entry point to the Data Bus.
+    """
+    return jsonify({
+        "service": "Paper Trading Data Bus",
+        "version": "2.0",
+        "endpoints": {
+            "/discover": {
+                "method": "GET",
+                "description": "This endpoint — list all available endpoints",
+                "params": {},
+            },
+            "/health": {
+                "method": "GET",
+                "description": "Service health check",
+                "params": {},
+            },
+            "/metrics": {
+                "method": "GET",
+                "description": "Prometheus scrape target",
+                "params": {},
+            },
+            "/quotes": {
+                "method": "GET",
+                "description": "Latest quote data for stock symbols",
+                "params": {
+                    "symbols": {"type": "string", "required": True, "description": "Comma-separated tickers (e.g. AAPL,TSLA,NVDA)"},
+                },
+            },
+            "/crypto": {
+                "method": "GET",
+                "description": "Latest crypto quotes",
+                "params": {
+                    "symbols": {"type": "string", "required": True, "description": "Comma-separated pairs (e.g. BTC/USD,ETH/USD)"},
+                },
+            },
+            "/fundamentals": {
+                "method": "GET",
+                "description": "Fundamental data (P/E, EPS, market cap, etc.)",
+                "params": {
+                    "symbol": {"type": "string", "required": True, "description": "Single ticker symbol"},
+                },
+            },
+            "/sentiment": {
+                "method": "GET, POST",
+                "description": "News/newsletter sentiment analysis via FinBERT or keyword fallback",
+                "params": {"symbol": ["string", "required for GET"], "text": ["string", "required for POST"]},
+            },
+            "/sentiment-divergence": {
+                "method": "GET",
+                "description": "Cross-language sentiment divergence (English vs Traditional Chinese)",
+                "params": {"symbol": {"type": "string", "required": True}},
+            },
+            "/options": {
+                "method": "GET",
+                "description": "Options chain / stock snapshot",
+                "params": {"symbol": {"type": "string", "required": True}},
+            },
+            "/news": {
+                "method": "GET",
+                "description": "News headlines from Alpaca API",
+                "params": {
+                    "symbol": {"type": "string", "required": False, "description": "Filter by ticker"},
+                    "limit": {"type": "int", "required": False, "default": 10},
+                },
+            },
+            "/news-cache": {
+                "method": "GET",
+                "description": "RSS news feed from news_cache table",
+                "params": {
+                    "limit": {"type": "int", "required": False, "default": 30},
+                    "source": {"type": "string", "required": False},
+                    "days": {"type": "int", "required": False, "default": 1},
+                },
+            },
+            "/news/search": {
+                "method": "GET",
+                "description": "Full-text search on news articles",
+                "params": {
+                    "q": {"type": "string", "required": True, "description": "Search query"},
+                    "limit": {"type": "int", "required": False, "default": 20},
+                },
+            },
+            "/social": {
+                "method": "GET",
+                "description": "Social media sentiment (Bluesky, Stocktwits, Reddit)",
+                "params": {
+                    "source": {"type": "string", "required": False, "default": "all", "description": "bluesky|stocktwits|reddit|all"},
+                    "fast": {"type": "bool", "required": False, "description": "Skip live fetch, return cached"},
+                },
+            },
+            "/signals": {
+                "method": "GET, POST",
+                "description": "Trader intercom — publish/read short-term reads",
+                "params": {
+                    "GET": "returns all active signals",
+                    "POST": {"body": {"agent": "str", "ticker": "str", "bias": "bullish|bearish|neutral", "conviction": "float", "note": "str"}},
+                },
+            },
+            "/momentum": {
+                "method": "GET",
+                "description": "Cross-sectional momentum rankings for Kairos",
+                "params": {},
+            },
+            "/percentile": {
+                "method": "GET",
+                "description": "Percentile rankings within the universe by metric",
+                "params": {
+                    "symbols": {"type": "string", "required": True},
+                    "metric": {"type": "string", "required": False, "default": "momentum_1m"},
+                },
+            },
+            "/macro": {
+                "method": "GET",
+                "description": "Macro indicators (CPI, PCE, unemployment, yields, GDP)",
+                "params": {},
+            },
+            "/earnings": {
+                "method": "GET",
+                "description": "Earnings calendar",
+                "params": {"symbols": {"type": "string", "required": False, "description": "Comma-separated tickers"}},
+            },
+            "/fear_greed": {
+                "method": "GET",
+                "description": "Fear & Greed Index from alternative.me",
+                "params": {},
+            },
+            "/flow": {
+                "method": "GET",
+                "description": "Unusual options flow from Unusual Whales RSS",
+                "params": {"symbol": {"type": "string", "required": False}},
+            },
+            "/insiders": {
+                "method": "GET",
+                "description": "SEC Form 4 insider filings",
+                "params": {"symbols": {"type": "string", "required": False}},
+            },
+            "/congress": {
+                "method": "GET",
+                "description": "Congress trading data",
+                "params": {"symbols": {"type": "string", "required": False}},
+            },
+            "/tick-snapshot": {
+                "method": "GET",
+                "description": "One-stop data for trader ticks: quotes, regime, fear_greed, macro, signals, portfolio state",
+                "params": {},
+            },
+            "/ml-signal": {
+                "method": "GET",
+                "description": "ML signal for a symbol",
+                "params": {"symbol": {"type": "string", "required": True}},
+            },
+            "/source-quality": {
+                "method": "GET",
+                "description": "Prediction accuracy stats per news/social source",
+                "params": {
+                    "source": {"type": "string", "required": False},
+                    "days": {"type": "int", "required": False, "default": 90},
+                },
+            },
+            "/risk": {
+                "method": "GET",
+                "description": "Portfolio risk scoring",
+                "params": {"symbols": {"type": "string", "required": False}},
+            },
+            "/technical-scan": {
+                "method": "GET",
+                "description": "Multi-timeframe technical scan",
+                "params": {"symbol": {"type": "string", "required": True}},
+            },
+            "/equity-analysis": {
+                "method": "GET",
+                "description": "Equity analysis",
+                "params": {"symbol": {"type": "string", "required": True}},
+            },
+            "/briefing": {
+                "method": "GET",
+                "description": "Daily market briefing",
+                "params": {},
+            },
+            "/overnight-sentiment": {
+                "method": "GET",
+                "description": "Overnight sentiment delta for tracked tickers",
+                "params": {"ticker": {"type": "string", "required": True}},
+            },
+            "/virtual-traders": {
+                "method": "GET",
+                "description": "List all registered virtual traders with their current stats",
+                "params": {},
+            },
+            "/virtual-traders/register": {
+                "method": "POST",
+                "description": "Register a new virtual trader for an external agent",
+                "params": {
+                    "name": {"type": "string", "required": True, "description": "Unique trader name"},
+                    "api_key": {"type": "string", "required": False, "description": "Optional external API key"},
+                    "base_strategy": {"type": "string", "required": True, "description": "momentum|value|aggro"},
+                    "initial_params": {"type": "object", "required": False, "description": "Optional JSON config overrides"},
+                },
+            },
+            "/virtual-traders/leaderboard": {
+                "method": "GET",
+                "description": "Leaderboard of virtual traders ranked by P&L",
+                "params": {},
+            },
+            "/trader/<agent>/config": {
+                "method": "GET, PATCH",
+                "description": "Get or update per-trader configuration (exploration mode, position sizing, etc.)",
+                "params": {
+                    "GET": "Returns current config for the agent",
+                    "PATCH": {"body": {"exploration_mode": "bool", "max_position_pct": "float", "conviction_threshold": "float", "watchlist_size": "int"}},
+                },
+            },
+        },
+        "links": {
+            "dashboard": "/dashboard",
+            "debug": "/debug",
+        },
+        "fetched_at": datetime.now().isoformat(),
+    })
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Virtual Trader Registration & Management
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_VT_DB_DSN = os.getenv("VT_DB_DSN", "host=docker.klo port=5433 dbname=trading user=trader")
+
+
+def _get_vt_db():
+    """Get psycopg2 connection to trading DB for virtual trader ops."""
+    import psycopg2 as _psycopg2
+    import psycopg2.extras as _psycopg2_extras
+    conn = _psycopg2.connect(_VT_DB_DSN)
+    conn.autocommit = True
+    return conn
+
+
+def _compute_virtual_pnl(trader_ids: list) -> dict:
+    """Compute 7-day P&L for virtual traders (realized + unrealized).
+
+    Mirrors the logic in virtual_cull.py compute_7day_pnl() but
+    returns data from the data bus for leaderboard display.
+    """
+    from datetime import date as _d, timedelta as _td
+    import psycopg2.extras as _psycopg2_extras
+
+    if not trader_ids:
+        return {}
+
+    since = _d.today() - _td(days=7)
+    today = _d.today()
+
+    conn = _get_vt_db()
+    cur = conn.cursor(cursor_factory=_psycopg2_extras.RealDictCursor)
+
+    # Realized P&L
+    placeholders = ",".join(["%s"] * len(trader_ids))
+    cur.execute(
+        f"""SELECT trader_id, COALESCE(SUM(pnl), 0) as realized_pnl
+            FROM trading.trades
+            WHERE trader_id IN ({placeholders})
+              AND exit_time IS NOT NULL
+              AND exit_time::date >= %s
+            GROUP BY trader_id""",
+        (*trader_ids, since),
+    )
+    realized_map = {row["trader_id"]: float(row["realized_pnl"]) for row in cur.fetchall()}
+
+    # Unrealized P&L
+    cur.execute(
+        f"""SELECT trader_id, ticker, SUM(shares) as total_shares,
+                   AVG(entry_price) as avg_entry
+            FROM trading.trades
+            WHERE trader_id IN ({placeholders})
+              AND exit_time IS NULL
+            GROUP BY trader_id, ticker
+            HAVING SUM(shares) != 0""",
+        (*trader_ids,),
+    )
+    open_positions = cur.fetchall()
+
+    # Get latest close prices
+    open_tickers = list({p["ticker"] for p in open_positions})
+    close_prices = {}
+    for ticker in set(open_tickers):
+        cur.execute(
+            """SELECT close FROM market_data.bars
+               WHERE ticker = %s AND timestamp <= %s::timestamp + interval '1 day'
+               ORDER BY timestamp DESC LIMIT 1""",
+            (ticker, today),
+        )
+        row = cur.fetchone()
+        if row:
+            close_prices[ticker] = float(row["close"])
+
+    from collections import defaultdict
+    unrealized_map = defaultdict(float)
+    for pos in open_positions:
+        trader = pos["trader_id"]
+        ticker = pos["ticker"]
+        shares = int(pos["total_shares"])
+        entry = float(pos["avg_entry"])
+        close = close_prices.get(ticker, entry)
+        unrealized_map[trader] += (close - entry) * shares
+
+    conn.close()
+
+    pnl_map = {}
+    for tid in trader_ids:
+        realized = realized_map.get(tid, 0.0)
+        unrealized = unrealized_map.get(tid, 0.0)
+        pnl_map[tid] = realized + unrealized
+
+    return pnl_map
+
+
+@app.route("/virtual-traders/register", methods=["POST"])
+def virtual_trader_register():
+    """
+    POST /virtual-traders/register
+
+    Register a new virtual trader for an external agent (like Hermes).
+
+    Body:
+      name:          (required) Unique trader name
+      api_key:       (optional) External API key for identity
+      base_strategy: (required) momentum|value|aggro
+      initial_params:(optional) JSON dict of config overrides
+
+    Returns:
+      New virtual trader record with ID, name, status, created_at
+    """
+    body = request.get_json(silent=True) or {}
+
+    name = (body.get("name") or "").strip()
+    base_strategy = (body.get("base_strategy") or "").strip().lower()
+
+    if not name:
+        return jsonify({"error": "name field is required"}), 400
+    if not base_strategy:
+        return jsonify({"error": "base_strategy field is required"}), 400
+    if base_strategy not in ("momentum", "value", "aggro"):
+        return jsonify({"error": f"base_strategy must be one of: momentum, value, aggro"}), 400
+
+    initial_params = body.get("initial_params", {})
+    if not isinstance(initial_params, dict):
+        return jsonify({"error": "initial_params must be a JSON object"}), 400
+
+    # Normalize the name: use as-is for external, map base_strategy to variant_type
+    variant_type = base_strategy
+    if base_strategy == "momentum":
+        variant_type = "params"
+    elif base_strategy == "value":
+        variant_type = "prompt"
+    elif base_strategy == "aggro":
+        variant_type = "wildcard"
+
+    config = {
+        "base_strategy": base_strategy,
+        "origin": "external",
+        "external_name": name,
+    }
+    if initial_params:
+        config["params"] = initial_params
+
+    try:
+        conn = _get_vt_db()
+        cur = conn.cursor()
+
+        # Check for duplicate name
+        cur.execute("SELECT id FROM trading.virtual_traders WHERE name = %s", (name,))
+        if cur.fetchone():
+            conn.close()
+            return jsonify({"error": f"Trader '{name}' already exists"}), 409
+
+        cur.execute(
+            """INSERT INTO trading.virtual_traders
+               (name, base_trader, variant_type, config, status, created_at, wins)
+               VALUES (%s, %s, %s, %s::jsonb, 'probation', %s, 0)
+               RETURNING id, name, status, created_at""",
+            (name, "external", variant_type, json.dumps(config), date.today()),
+        )
+        row = cur.fetchone()
+        conn.close()
+
+        log.info("Registered external virtual trader: %s (strategy=%s)", name, base_strategy)
+
+        return jsonify({
+            "id": row[0],
+            "name": row[1],
+            "status": row[2],
+            "base_strategy": base_strategy,
+            "created_at": str(row[3]) if row[3] else str(date.today()),
+        }), 201
+
+    except Exception as e:
+        log.error("Failed to register virtual trader '%s': %s", name, e)
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
+@app.route("/virtual-traders", methods=["GET"])
+def virtual_trader_list():
+    """
+    GET /virtual-traders
+
+    List all registered virtual traders with their current stats.
+    Returns status, base_trader, win count, and 7-day P&L for each.
+    """
+    try:
+        conn = _get_vt_db()
+        import psycopg2.extras as _psycopg2_extras
+        cur = conn.cursor(cursor_factory=_psycopg2_extras.RealDictCursor)
+
+        cur.execute(
+            """SELECT id, name, base_trader, variant_type, status, wins,
+                      created_at, culled_at
+               FROM trading.virtual_traders
+               ORDER BY status, name"""
+        )
+        rows = cur.fetchall()
+        conn.close()
+
+        traders = [dict(r) for r in rows]
+
+        # Compute 7-day P&L for active traders
+        active_names = [t["name"] for t in traders if t["status"] in ("active", "live", "probation")]
+        pnl_map = _compute_virtual_pnl(active_names) if active_names else {}
+
+        for t in traders:
+            t["pnl_7d"] = round(pnl_map.get(t["name"], 0.0), 2)
+            # Convert date fields to strings
+            for date_field in ["created_at", "culled_at"]:
+                if t.get(date_field):
+                    t[date_field] = str(t[date_field])
+
+        return jsonify({
+            "count": len(traders),
+            "traders": traders,
+        })
+
+    except Exception as e:
+        log.error("Failed to list virtual traders: %s", e)
+        return jsonify({"error": str(e), "traders": []}), 500
+
+
+@app.route("/virtual-traders/leaderboard", methods=["GET"])
+def virtual_trader_leaderboard():
+    """
+    GET /virtual-traders/leaderboard
+
+    Leaderboard of virtual traders ranked by 7-day P&L.
+    Only shows traders with status 'active', 'live', or 'probation'.
+    """
+    try:
+        conn = _get_vt_db()
+        import psycopg2.extras as _psycopg2_extras
+        cur = conn.cursor(cursor_factory=_psycopg2_extras.RealDictCursor)
+
+        cur.execute(
+            """SELECT id, name, base_trader, variant_type, status, wins,
+                      created_at
+               FROM trading.virtual_traders
+               WHERE status IN ('active', 'live', 'probation')
+               ORDER BY name"""
+        )
+        rows = cur.fetchall()
+        conn.close()
+
+        active = [dict(r) for r in rows]
+        names = [t["name"] for t in active]
+        pnl_map = _compute_virtual_pnl(names)
+
+        for t in active:
+            t["pnl_7d"] = round(pnl_map.get(t["name"], 0.0), 2)
+            if t.get("created_at"):
+                t["created_at"] = str(t["created_at"])
+
+        ranked = sorted(active, key=lambda x: x["pnl_7d"], reverse=True)
+
+        leaderboard = []
+        for rank, entry in enumerate(ranked, 1):
+            leaderboard.append({
+                "rank": rank,
+                "name": entry["name"],
+                "base_trader": entry["base_trader"],
+                "strategy": entry["variant_type"],
+                "status": entry["status"],
+                "wins": entry["wins"],
+                "pnl_7d": entry["pnl_7d"],
+                "created_at": entry["created_at"],
+            })
+
+        return jsonify({
+            "leaderboard": leaderboard,
+            "count": len(leaderboard),
+        })
+
+    except Exception as e:
+        log.error("Failed to compute virtual trader leaderboard: %s", e)
+        return jsonify({"error": str(e), "leaderboard": []}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Trader Config — exploration mode & runtime settings
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _ensure_trader_config_table():
+    """Create the trader_config table if it doesn't exist."""
+    import psycopg2 as _psycopg2
+    try:
+        conn = _get_vt_db()
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS trading.trader_config (
+                agent_id TEXT PRIMARY KEY,
+                exploration_mode BOOLEAN DEFAULT false,
+                exploration_started_at TIMESTAMPTZ,
+                max_position_pct FLOAT DEFAULT 25.0,
+                conviction_threshold FLOAT DEFAULT 0.6,
+                watchlist_size INT DEFAULT 20,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        conn.close()
+    except Exception as e:
+        log.warning("Could not ensure trader_config table: %s", e)
+
+
+@app.route("/trader/<agent>/config", methods=["GET"])
+def trader_get_config(agent):
+    """
+    GET /trader/<agent>/config
+
+    Get the current configuration for a trader agent.
+    Returns all config fields including exploration mode.
+    If no config row exists, returns defaults.
+    """
+    _ensure_trader_config_table()
+    try:
+        import psycopg2.extras as _psycopg2_extras
+        conn = _get_vt_db()
+        cur = conn.cursor(cursor_factory=_psycopg2_extras.RealDictCursor)
+
+        cur.execute(
+            """SELECT agent_id, exploration_mode, exploration_started_at,
+                      max_position_pct, conviction_threshold, watchlist_size,
+                      created_at, updated_at
+               FROM trading.trader_config
+               WHERE agent_id = %s""",
+            (agent,),
+        )
+        row = cur.fetchone()
+        conn.close()
+
+        if row:
+            config = dict(row)
+            # Convert dates to strings
+            for df in ["exploration_started_at", "created_at", "updated_at"]:
+                if config.get(df):
+                    config[df] = config[df].isoformat()
+            return jsonify({"agent": agent, "config": config})
+
+        # No row yet — return defaults
+        return jsonify({
+            "agent": agent,
+            "config": {
+                "agent_id": agent,
+                "exploration_mode": False,
+                "exploration_started_at": None,
+                "max_position_pct": 25.0,
+                "conviction_threshold": 0.6,
+                "watchlist_size": 20,
+            },
+            "note": "defaults (no config row exists yet)",
+        })
+
+    except Exception as e:
+        log.error("Failed to get config for agent '%s': %s", agent, e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/trader/<agent>/config", methods=["PATCH"])
+def trader_patch_config(agent):
+    """
+    PATCH /trader/<agent>/config
+
+    Update the configuration for a trader agent.
+    Any subset of config fields can be provided; only those fields are updated.
+
+    Body fields:
+      exploration_mode:     (bool) Enable/disable small-trades exploration mode
+      max_position_pct:    (float) Max position size as % of portfolio
+      conviction_threshold: (float) Min conviction to enter a trade (0.0-1.0)
+      watchlist_size:      (int) Max size of the watchlist
+
+    Returns:
+      Updated config object.
+    """
+    _ensure_trader_config_table()
+    body = request.get_json(silent=True) or {}
+
+    if not body:
+        return jsonify({"error": "No fields provided to update"}), 400
+
+    # Validate known fields with diffs to apply
+    allowed_fields = {
+        "exploration_mode": bool,
+        "max_position_pct": float,
+        "conviction_threshold": float,
+        "watchlist_size": int,
+    }
+
+    updates = {}
+    for field, field_type in allowed_fields.items():
+        if field in body:
+            val = body[field]
+            if isinstance(val, bool) and field_type == bool:
+                updates[field] = val
+            elif isinstance(val, (int, float)) and field_type in (int, float):
+                updates[field] = field_type(val)
+            else:
+                try:
+                    val_cast = field_type(val)
+                    updates[field] = val_cast
+                except (ValueError, TypeError):
+                    return jsonify({"error": f"Invalid type for {field}: expected {field_type.__name__}"}), 400
+
+    if not updates:
+        return jsonify({"error": "No valid config fields provided. Allowed: exploration_mode, max_position_pct, conviction_threshold, watchlist_size"}), 400
+
+    try:
+        conn = _get_vt_db()
+        cur = conn.cursor()
+
+        # Handle exploration_started_at
+        if "exploration_mode" in updates and updates["exploration_mode"]:
+            updates["exploration_started_at"] = datetime.now(timezone.utc)
+
+        # Build SET clause
+        set_parts = []
+        values = []
+        for field, val in updates.items():
+            set_parts.append(f"{field} = %s")
+            values.append(val)
+        values.append(agent)
+
+        # UPSERT: insert if not exists, update if exists
+        # We use INSERT ... ON CONFLICT since we want upsert behavior
+        cols = ["agent_id"] + list(updates.keys())
+        placeholders = ["%s"] * len(cols)
+        insert_vals = [agent]
+        for field in updates:
+            insert_vals.append(updates[field])
+
+        update_set = ", ".join([f"{k} = EXCLUDED.{k}" for k in updates.keys()])
+
+        cur.execute(
+            f"""INSERT INTO trading.trader_config ({', '.join(cols)})
+               VALUES ({', '.join(placeholders)})
+               ON CONFLICT (agent_id) DO UPDATE SET
+                 {update_set}
+               RETURNING agent_id, exploration_mode, exploration_started_at,
+                         max_position_pct, conviction_threshold, watchlist_size,
+                         created_at, updated_at""",
+            insert_vals,
+        )
+        row = cur.fetchone()
+        conn.close()
+
+        log.info("Updated config for agent '%s': %s", agent, json.dumps(updates))
+
+        config = {
+            "agent_id": row[0],
+            "exploration_mode": row[1],
+            "exploration_started_at": row[2].isoformat() if row[2] else None,
+            "max_position_pct": float(row[3]) if row[3] else 25.0,
+            "conviction_threshold": float(row[4]) if row[4] else 0.6,
+            "watchlist_size": row[5] if row[5] else 20,
+            "created_at": row[6].isoformat(),
+            "updated_at": row[7].isoformat(),
+        }
+
+        return jsonify({"agent": agent, "config": config, "updated": list(updates.keys())})
+
+    except Exception as e:
+        log.error("Failed to update config for agent '%s': %s", agent, e)
+        return jsonify({"error": str(e)}), 500
 
 
 def main():
@@ -6272,6 +6971,12 @@ def main():
     log.info("  GET  /briefing")
     log.info("  GET  /news-cache?limit=30&source=marketwatch&days=1  (NEW — RSS news feed)")
     log.info("  GET  /news/search?q=AAPL  (NEW — search news cache)")
+    log.info("  GET  /discover             (NEW — API discovery listing)")
+    log.info("  GET  /virtual-traders       (NEW — list virtual traders)")
+    log.info("  POST /virtual-traders/register  (NEW — register external trader)")
+    log.info("  GET  /virtual-traders/leaderboard  (NEW — P&L leaderboard)")
+    log.info("  GET  /trader/:agent/config  (NEW — get trader config)")
+    log.info("  PATCH /trader/:agent/config (NEW — update trader config)")
     log.info("")
     log.info("MCP Tools (port %d — SSE transport):", _mcp_port)
     log.info("  get_quotes(symbols)")
