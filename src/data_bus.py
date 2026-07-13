@@ -1951,29 +1951,189 @@ def health():
 
 @app.route("/health/dashboard")
 def health_dashboard():
-    """Dashboard-specific health check — includes Postgres status, data bus, and cache health."""
-    pg_status = {"connected": False, "error": None}
+    """Comprehensive health dashboard — data bus, per-trader stats, Postgres, and alerts.
+
+    Returns:
+        data_bus:  Service status, scheduler count, uptime
+        trader-*:  Per-trader status, last_tick, trades_today, pnl_today
+        postgres:  Connection status and active connections
+        alerts:    Detected warnings (losing streaks, stale ticks, etc.)
+    """
+    uptime = time.time() - _start_time
+
+    # ── Data bus status ──
+    data_bus_status = {
+        "status": "ok",
+        "schedulers": len(_schedulers),
+        "uptime_seconds": round(uptime, 1),
+    }
+
+    # ── Postgres status ──
+    pg_status = {"status": "ok", "active_connections": 0}
     try:
         import psycopg2 as _pg
         conn = _pg.connect("postgresql://trader:@192.168.1.179:5433/trading", connect_timeout=3)
         conn.autocommit = True
         cur = conn.cursor()
-        cur.execute("SELECT 1")
-        pg_status["connected"] = True
+        cur.execute("SELECT count(*) FROM pg_stat_activity WHERE state = 'active'")
+        active = cur.fetchone()
+        pg_status["active_connections"] = int(active[0]) if active else 0
         conn.close()
     except Exception as e:
+        pg_status["status"] = "error"
         pg_status["error"] = str(e)
 
-    return jsonify({
-        "status": "ok",
-        "service": "data-bus",
+    # ── Trader statuses ──
+    trader_ids = ["kairos", "aldridge", "stonks"]
+    trader_map = {
+        "kairos": "trader-kairos",
+        "aldridge": "trader-aldridge",
+        "stonks": "trader-stonks",
+    }
+
+    traders = {}
+    today = date.today()
+
+    # Get pulse from trader_decisions (SQLite)
+    pulse_data = {}
+    try:
+        conn = _get_sqlite_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT agent_id, MAX(timestamp) as last_ts FROM trader_decisions GROUP BY agent_id"
+        )
+        for row in cursor.fetchall():
+            pulse_data[row["agent_id"]] = row["last_ts"]
+        conn.close()
+    except Exception:
+        pass
+
+    # Get today's trade stats from Postgres
+    trade_stats = {}
+    all_recent = []
+    pg_available = pg_status["status"] == "ok"
+    if pg_available:
+        try:
+            import psycopg2 as _pg2
+            conn = _pg2.connect("postgresql://trader:@192.168.1.179:5433/trading", connect_timeout=3)
+            conn.autocommit = True
+            import psycopg2.extras as _pg_extras
+            cur = conn.cursor(cursor_factory=_pg_extras.RealDictCursor)
+
+            placeholders = ",".join(["%s"] * len(trader_ids))
+            cur.execute(
+                f"""SELECT trader_id,
+                           COUNT(*) as trades_today,
+                           COALESCE(SUM(pnl), 0) as pnl_today,
+                           COALESCE(AVG(CASE WHEN pnl > 0 THEN 1 ELSE 0 END), 0) as win_rate
+                    FROM trading.trades
+                    WHERE trader_id IN ({placeholders})
+                      AND entry_time::date >= %s
+                    GROUP BY trader_id
+                """,
+                (*trader_ids, today),
+            )
+            for row in cur.fetchall():
+                trade_stats[row["trader_id"]] = {
+                    "trades_today": int(row["trades_today"]),
+                    "pnl_today": round(float(row["pnl_today"]), 2),
+                    "win_rate": round(float(row["win_rate"]), 4),
+                }
+
+            # Check for losing streaks
+            cur.execute(
+                f"""SELECT trader_id, pnl
+                    FROM trading.trades
+                    WHERE trader_id IN ({placeholders})
+                      AND exit_time IS NOT NULL
+                    ORDER BY trader_id, exit_time DESC
+                    LIMIT 30
+                """,
+                (*trader_ids,),
+            )
+            all_recent = cur.fetchall()
+            conn.close()
+        except Exception as e:
+            log.warning("Health dashboard: trade stats query failed: %s", e)
+
+    # Build trader responses
+    alerts = []
+    for tid in trader_ids:
+        agent_key = trader_map[tid]
+        pulse_ts = pulse_data.get(agent_key)
+
+        stats = trade_stats.get(tid, {})
+        trades_today = stats.get("trades_today", 0)
+        pnl_today = stats.get("pnl_today", 0.0)
+
+        # Determine status based on recent activity and trades
+        if trades_today > 0:
+            trader_status = "active"
+        elif trades_today == 0:
+            trader_status = "idle"
+        else:
+            trader_status = "unknown"
+
+        traders[agent_key] = {
+            "status": trader_status,
+            "last_tick": pulse_ts or "never",
+            "trades_today": trades_today,
+            "pnl_today": pnl_today,
+        }
+
+        # Detect losing streaks
+        trader_recent = [r for r in all_recent if r["trader_id"] == tid]
+        streak = 0
+        for r in trader_recent:
+            pnl = r["pnl"]
+            if pnl is not None and float(pnl) < 0:
+                streak += 1
+            else:
+                break
+        if streak >= 3:
+            name_display = tid.capitalize()
+            alerts.append({
+                "severity": "warning",
+                "message": f"{name_display} on a {streak}-trade losing streak",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+        elif streak >= 5:
+            name_display = tid.capitalize()
+            alerts.append({
+                "severity": "critical",
+                "message": f"{name_display} on a {streak}-trade losing streak — possible strategy failure",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+
+    # Check for stale ticks (>5 min since last pulse)
+    now = time.time()
+    for agent_key, trader_data in traders.items():
+        if trader_data["last_tick"] != "never":
+            try:
+                dt = datetime.fromisoformat(trader_data["last_tick"])
+                age = now - dt.timestamp()
+                if age > 300:
+                    alerts.append({
+                        "severity": "warning",
+                        "message": f"{agent_key} tick stale ({age:.0f}s since last tick)",
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    })
+            except Exception:
+                pass
+
+    # Sort alerts by severity
+    severity_order = {"critical": 0, "warning": 1, "info": 2}
+    alerts.sort(key=lambda a: severity_order.get(a["severity"], 9))
+
+    response = {
+        "data_bus": data_bus_status,
         "postgres": pg_status,
-        "cache": _cache.stats(),
-        "signals": len(_signals_cache),
-        "tracked_symbols": len(_tracked_symbols),
-        "uptime_seconds": time.time() - _start_time,
+        "alerts": alerts,
         "checked_at": datetime.now(timezone.utc).isoformat(),
-    })
+    }
+    response.update(traders)
+
+    return jsonify(response)
 
 
 # ── Source Quality ───────────────────────────────────────────────────────────
@@ -5515,6 +5675,41 @@ def _start_mcp_server():
     return thread
 
 
+def start_observability_logger():
+    """Initialize the observability logging infrastructure.
+
+    Sets up JSONL logging for the data bus and kicks off the periodic
+    Canvas dashboard push thread.
+    """
+    from src.observability.logger import setup_logging, get_logger
+    from src.observability.trader_logger import get_trader_logger
+    from src.canvas_dashboard import push_health_dashboard
+
+    log_dir = os.path.join(os.path.dirname(__file__), "..", "logs")
+    os.makedirs(log_dir, exist_ok=True)
+
+    setup_logging(
+        level="INFO",
+        json_log=os.path.join(log_dir, "data_bus.jsonl"),
+        console=True,
+    )
+
+    db_log = get_logger("databus")
+    db_log.info("Observability logger initialized")
+
+    # Start canvas dashboard push thread (every 5 min)
+    from src.canvas_dashboard import start_periodic_push
+    start_periodic_push(interval=300, board="trading")
+    db_log.info("Canvas dashboard push thread started (every 5 min)")
+
+    # Create TraderLoggers for each agent
+    for agent_id in ["kairos", "aldridge", "stonks"]:
+        log_obj = get_trader_logger(agent_id, log_dir=log_dir)
+        db_log.info("TraderLogger created for %s", agent_id)
+
+    return db_log
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Scheduler Functions
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -7176,6 +7371,12 @@ def main():
         start_news_collector()
     else:
         log.warning("News collector not available — skipping")
+
+    # Start observability logger (structured JSONL + Canvas dashboard push)
+    try:
+        start_observability_logger()
+    except Exception as e:
+        log.warning("Observability logger startup failed: %s", e)
 
     log.info("Data Bus starting on %s:%s", args.host, args.port)
     log.info("Tracked symbols: %s", sorted(_tracked_symbols)[:10])

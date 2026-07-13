@@ -7,6 +7,7 @@ Provides:
   - metrics (MetricsRegistry): in-memory counters, gauges, histograms
   - alert (AlertManager): P0/P1/INFO alert routing
   - telegram_alert(): send P0 alerts to Telegram via webhook
+  - TraderLogger: per-agent structured JSONL logging to logs/{agent_id}/YYYY-MM-DD.jsonl
 
 Usage:
     from src.observability import setup_logging, get_logger, metrics, alert
@@ -26,6 +27,7 @@ from src.observability.logger import setup_logging, get_logger, JsonFormatter, S
 from src.observability.metrics import MetricsRegistry, metrics
 from src.observability.alert import AlertManager, alert
 from src.observability.telegram import telegram_alert, configure_telegram
+from src.observability.trader_logger import TraderLogger, get_trader_logger
 
 __all__ = [
     "setup_logging",
@@ -38,4 +40,6 @@ __all__ = [
     "alert",
     "telegram_alert",
     "configure_telegram",
+    "TraderLogger",
+    "get_trader_logger",
 ]

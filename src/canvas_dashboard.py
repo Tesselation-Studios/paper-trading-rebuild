@@ -5,11 +5,16 @@ Provides:
   - CanvasDashboard: collects metrics, alerts, circuit breaker status
   - push_health_dashboard(): one-shot push of a system health card
   - push_metrics_snapshot(): push the metrics snapshot as a markdown table
+  - start_periodic_push(): background thread that pushes every N seconds
 
 Usage:
     from src.canvas_dashboard import push_health_dashboard
 
     push_health_dashboard(board="trading")
+
+    # Or for periodic pushes:
+    from src.canvas_dashboard import start_periodic_push
+    start_periodic_push(interval=300, board="trading")
 
 Ref: SPEC-v3 observability requirements, issue#75
 """
@@ -19,6 +24,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
@@ -349,6 +355,43 @@ def push_health_dashboard(
         alert.info("Canvas health push failed", {"error": str(e)})
         print(f"[canvas_dashboard] Health push failed: {e}")
         return None
+
+
+def start_periodic_push(interval: int = 300, board: str = "trading", daemon: bool = True) -> threading.Thread:
+    """Start a background thread that periodically pushes health dashboard to Canvas.
+
+    Args:
+        interval: Seconds between pushes (default: 300 = 5 min).
+        board: Canvas board name.
+        daemon: Whether the thread is a daemon (default: True).
+
+    Returns:
+        The background thread (already started).
+    """
+    import time as _time
+    from src.observability import get_logger
+
+    log = get_logger("canvas_dashboard")
+    card_id: Optional[str] = None
+    running = True
+
+    def _loop():
+        nonlocal card_id
+        log.info("Periodic Canvas push started (every %ds on board '%s')", interval, board)
+        while running:
+            try:
+                result = push_health_dashboard(board=board, card_id=card_id, expires_days=1)
+                if result:
+                    card_id = result
+                log.debug("Canvas dashboard push complete")
+            except Exception as e:
+                log.warning("Periodic Canvas push failed: %s", e)
+            _time.sleep(interval)
+        log.info("Periodic Canvas push stopped")
+
+    thread = threading.Thread(target=_loop, daemon=daemon, name="canvas-periodic-push")
+    thread.start()
+    return thread
 
 
 # ── CLI entry point ──
