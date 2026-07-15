@@ -502,7 +502,7 @@ class DbWriteQueue:
                 columns = list(rows[0].keys())
                 placeholders = ", ".join(["?" for _ in columns])
                 col_str = ", ".join(columns)
-                sql = f"INSERT INTO {table} ({col_str}) VALUES ({placeholders})"
+                sql = "INSERT INTO " + _safe_quote_ident(table) + " (" + col_str + ") VALUES (" + placeholders + ")"
                 values = [[r.get(c) for c in columns] for r in rows]
                 cursor.executemany(sql, values)
             conn.commit()
@@ -1722,7 +1722,7 @@ def _sqlite_persist(table: str, data: dict):
         columns = list(mapped.keys())
         placeholders = ", ".join(["?" for _ in columns])
         col_str = ", ".join(columns)
-        sql = f"INSERT INTO {table} ({col_str}) VALUES ({placeholders})"
+        sql = "INSERT INTO " + _safe_quote_ident(table) + " (" + col_str + ") VALUES (" + placeholders + ")"
         cursor.execute(sql, [mapped.get(c) for c in columns])
         conn.commit()
         conn.close()
@@ -1749,11 +1749,11 @@ def _db_read(table: str, where_clause: str, params: tuple, order_by: str = None,
     try:
         conn = _get_cache_db_connection(readonly=True)
         cursor = conn.cursor()
-        sql = f"SELECT * FROM {table} WHERE {where_clause}"
+        sql = "SELECT * FROM " + _safe_quote_ident(table) + " WHERE " + where_clause
         if order_by:
-            sql += f" ORDER BY {order_by}"
+            sql += " ORDER BY " + order_by
         if limit > 0:
-            sql += f" LIMIT {limit}"
+            sql += " LIMIT " + str(limit)
         cursor.execute(sql, params)
         row = cursor.fetchone()
         conn.close()
@@ -1768,11 +1768,11 @@ def _db_read_multi(table: str, where_clause: str, params: tuple, order_by: str =
     try:
         conn = _get_cache_db_connection(readonly=True)
         cursor = conn.cursor()
-        sql = f"SELECT * FROM {table} WHERE {where_clause}"
+        sql = "SELECT * FROM " + _safe_quote_ident(table) + " WHERE " + where_clause
         if order_by:
-            sql += f" ORDER BY {order_by}"
+            sql += " ORDER BY " + order_by
         if limit > 0:
-            sql += f" LIMIT {limit}"
+            sql += " LIMIT " + str(limit)
         cursor.execute(sql, params)
         rows = cursor.fetchall()
         conn.close()
@@ -1974,22 +1974,23 @@ def source_quality():
             where += " AND timestamp >= ?"
             params.append(cutoff)
 
-        rows = conn.execute(f"""
-            SELECT 
-                source,
-                COUNT(*) as total,
-                SUM(CASE WHEN correct = 1 THEN 1 ELSE 0 END) as correct_count,
-                ROUND(AVG(CASE WHEN correct = 1 THEN 1.0 ELSE 0.0 END) * 100, 1) as accuracy_pct,
-                ROUND(AVG(quality_score), 3) as avg_quality,
-                ROUND(AVG(ABS(price_change_pct)), 4) as avg_move_pct,
-                ROUND(AVG(post_count), 1) as avg_posts,
-                MAX(timestamp) as last_scored
-            FROM source_quality
-            {where}
-            GROUP BY source
-            HAVING total >= ?
-            ORDER BY accuracy_pct DESC
-        """, params + [min_posts]).fetchall()
+        sql = (
+            "SELECT "
+            "source, "
+            "COUNT(*) as total, "
+            "SUM(CASE WHEN correct = 1 THEN 1 ELSE 0 END) as correct_count, "
+            "ROUND(AVG(CASE WHEN correct = 1 THEN 1.0 ELSE 0.0 END) * 100, 1) as accuracy_pct, "
+            "ROUND(AVG(quality_score), 3) as avg_quality, "
+            "ROUND(AVG(ABS(price_change_pct)), 4) as avg_move_pct, "
+            "ROUND(AVG(post_count), 1) as avg_posts, "
+            "MAX(timestamp) as last_scored "
+            "FROM source_quality "
+            + where + " "
+            "GROUP BY source "
+            "HAVING total >= ? "
+            "ORDER BY accuracy_pct DESC"
+        )
+        rows = conn.execute(sql, params + [min_posts]).fetchall()
         conn.close()
 
         sources = [dict(r) for r in rows]
@@ -2621,7 +2622,7 @@ def news_cache_feed():
     import psycopg2
     import psycopg2.extras
 
-    db_url = "postgresql://trader:@192.168.1.179:5433/trading"
+    db_url = os.getenv("NEWS_DB_URL", "postgresql://trader:@trading-db:5432/trading")
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
     where_parts = ["published_at >= %s::timestamptz"]
@@ -2638,12 +2639,12 @@ def news_cache_feed():
         conn.set_session(readonly=True)
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
-                f"""SELECT id, url, title, summary, source, published_at, collected_at,
-                           tickers, sentiment_score
-                    FROM public.news_cache
-                    WHERE {where}
-                    ORDER BY published_at DESC
-                    LIMIT %s""",
+                "SELECT id, url, title, summary, source, published_at, collected_at, "
+                "tickers, sentiment_score "
+                "FROM public.news_cache "
+                "WHERE " + where + " "
+                "ORDER BY published_at DESC "
+                "LIMIT %s",
                 params + [limit],
             )
             rows = cur.fetchall()
@@ -2699,7 +2700,7 @@ def news_search():
     import psycopg2
     import psycopg2.extras
 
-    db_url = "postgresql://trader:@192.168.1.179:5433/trading"
+    db_url = os.getenv("NEWS_DB_URL", "postgresql://trader:@trading-db:5432/trading")
     search_pattern = f"%{q}%"
 
     try:
@@ -3706,6 +3707,17 @@ def _get_env_keys_status() -> dict:
     return keys
 
 
+def _safe_quote_ident(ident: str) -> str:
+    """Safely quote a SQL identifier, only allowing alphanumeric + underscore chars."""
+    if ident is None or not isinstance(ident, str):
+        raise ValueError(f"Unsafe or invalid SQL identifier: {ident!r}")
+    if not ident or not ident.replace("_", "").isalnum():
+        raise ValueError(f"Unsafe or invalid SQL identifier: {ident!r}")
+    if ident[0].isdigit():
+        raise ValueError(f"Unsafe or invalid SQL identifier: {ident!r}")
+    return '"' + ident + '"'
+
+
 def _get_db_stats() -> dict:
     """Get full DB statistics from shared/trader.db."""
     db_path = SHARED_DIR / "trader.db"
@@ -3719,7 +3731,7 @@ def _get_db_stats() -> dict:
         for row in cursor.fetchall():
             tname = row[0]
             try:
-                cursor.execute(f'SELECT COUNT(*) FROM "{tname}"')
+                cursor.execute("SELECT COUNT(*) FROM " + _safe_quote_ident(tname))
                 count = cursor.fetchone()[0]
                 tables[tname] = count
                 total_rows += count
@@ -6439,7 +6451,7 @@ def discover():
 # Virtual Trader Registration & Management
 # ═══════════════════════════════════════════════════════════════════════════════
 
-_VT_DB_DSN = os.getenv("VT_DB_DSN", "host=docker.klo port=5433 dbname=trading user=trader")
+_VT_DB_DSN = os.getenv("VT_DB_DSN", "host=trading-db port=5432 dbname=trading user=trader")
 
 
 def _get_vt_db():
@@ -6466,68 +6478,74 @@ def _compute_virtual_pnl(trader_ids: list) -> dict:
     since = _d.today() - _td(days=7)
     today = _d.today()
 
-    conn = _get_vt_db()
-    cur = conn.cursor(cursor_factory=_psycopg2_extras.RealDictCursor)
+    try:
+        conn = _get_vt_db()
+        cur = conn.cursor(cursor_factory=_psycopg2_extras.RealDictCursor)
 
-    # Realized P&L
-    placeholders = ",".join(["%s"] * len(trader_ids))
-    cur.execute(
-        f"""SELECT trader_id, COALESCE(SUM(pnl), 0) as realized_pnl
-            FROM trading.trades
-            WHERE trader_id IN ({placeholders})
-              AND exit_time IS NOT NULL
-              AND exit_time::date >= %s
-            GROUP BY trader_id""",
-        (*trader_ids, since),
-    )
-    realized_map = {row["trader_id"]: float(row["realized_pnl"]) for row in cur.fetchall()}
-
-    # Unrealized P&L
-    cur.execute(
-        f"""SELECT trader_id, ticker, SUM(shares) as total_shares,
-                   AVG(entry_price) as avg_entry
-            FROM trading.trades
-            WHERE trader_id IN ({placeholders})
-              AND exit_time IS NULL
-            GROUP BY trader_id, ticker
-            HAVING SUM(shares) != 0""",
-        (*trader_ids,),
-    )
-    open_positions = cur.fetchall()
-
-    # Get latest close prices
-    open_tickers = list({p["ticker"] for p in open_positions})
-    close_prices = {}
-    for ticker in set(open_tickers):
+        # Realized P&L
+        placeholders = ",".join(["%s"] * len(trader_ids))
         cur.execute(
-            """SELECT close FROM market_data.bars
-               WHERE ticker = %s AND timestamp <= %s::timestamp + interval '1 day'
-               ORDER BY timestamp DESC LIMIT 1""",
-            (ticker, today),
+            "SELECT trader_id, COALESCE(SUM(pnl), 0) as realized_pnl "
+            "FROM trading.trades "
+            "WHERE trader_id IN (" + placeholders + ") "
+            "AND exit_time IS NOT NULL "
+            "AND exit_time::date >= %s "
+            "GROUP BY trader_id",
+            (*trader_ids, since),
         )
-        row = cur.fetchone()
-        if row:
-            close_prices[ticker] = float(row["close"])
+        realized_map = {row["trader_id"]: float(row["realized_pnl"]) for row in cur.fetchall()}
 
-    from collections import defaultdict
-    unrealized_map = defaultdict(float)
-    for pos in open_positions:
-        trader = pos["trader_id"]
-        ticker = pos["ticker"]
-        shares = int(pos["total_shares"])
-        entry = float(pos["avg_entry"])
-        close = close_prices.get(ticker, entry)
-        unrealized_map[trader] += (close - entry) * shares
+        # Unrealized P&L
+        placeholders = ",".join(["%s"] * len(trader_ids))
+        cur.execute(
+            "SELECT trader_id, ticker, SUM(shares) as total_shares, "
+            "AVG(entry_price) as avg_entry "
+            "FROM trading.trades "
+            "WHERE trader_id IN (" + placeholders + ") "
+            "AND exit_time IS NULL "
+            "GROUP BY trader_id, ticker "
+            "HAVING SUM(shares) != 0",
+            (*trader_ids,),
+        )
+        open_positions = cur.fetchall()
 
-    conn.close()
+        # Get latest close prices
+        open_tickers = list({p["ticker"] for p in open_positions})
+        close_prices = {}
+        for ticker in set(open_tickers):
+            cur.execute(
+                """SELECT close FROM market_data.bars
+                   WHERE ticker = %s AND timestamp <= %s::timestamp + interval '1 day'
+                   ORDER BY timestamp DESC LIMIT 1""",
+                (ticker, today),
+            )
+            row = cur.fetchone()
+            if row:
+                close_prices[ticker] = float(row["close"])
 
-    pnl_map = {}
-    for tid in trader_ids:
-        realized = realized_map.get(tid, 0.0)
-        unrealized = unrealized_map.get(tid, 0.0)
-        pnl_map[tid] = realized + unrealized
+        from collections import defaultdict
+        unrealized_map = defaultdict(float)
+        for pos in open_positions:
+            trader = pos["trader_id"]
+            ticker = pos["ticker"]
+            shares = int(pos["total_shares"])
+            entry = float(pos["avg_entry"])
+            close = close_prices.get(ticker, entry)
+            unrealized_map[trader] += (close - entry) * shares
 
-    return pnl_map
+        conn.close()
+
+        pnl_map = {}
+        for tid in trader_ids:
+            realized = realized_map.get(tid, 0.0)
+            unrealized = unrealized_map.get(tid, 0.0)
+            pnl_map[tid] = realized + unrealized
+
+        return pnl_map
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error("Error computing virtual P&L: %s", e)
+        return {}
 
 
 @app.route("/virtual-traders/register", methods=["POST"])
@@ -6927,16 +6945,19 @@ def trader_patch_config(agent):
         for field in updates:
             insert_vals.append(updates[field])
 
-        update_set = ", ".join([f"{k} = EXCLUDED.{k}" for k in updates.keys()])
+        # Column names are validated against allowed_fields, safe to use
+        update_set = ", ".join(f"{k} = EXCLUDED.{k}" for k in updates.keys())
+        col_str = ", ".join(cols)
+        ph_str = ", ".join(placeholders)
 
         cur.execute(
-            f"""INSERT INTO trading.trader_config ({', '.join(cols)})
-               VALUES ({', '.join(placeholders)})
-               ON CONFLICT (agent_id) DO UPDATE SET
-                 {update_set}
-               RETURNING agent_id, exploration_mode, exploration_started_at,
-                         max_position_pct, conviction_threshold, watchlist_size,
-                         created_at, updated_at""",
+            "INSERT INTO trading.trader_config (" + col_str + ") "
+            "VALUES (" + ph_str + ") "
+            "ON CONFLICT (agent_id) DO UPDATE SET "
+            + update_set + " "
+            "RETURNING agent_id, exploration_mode, exploration_started_at, "
+            "max_position_pct, conviction_threshold, watchlist_size, "
+            "created_at, updated_at",
             insert_vals,
         )
         row = cur.fetchone()
