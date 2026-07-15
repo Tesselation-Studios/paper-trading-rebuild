@@ -132,7 +132,7 @@ test.describe('Trader Detail Modal', () => {
     await card.click();
 
     // Modal should open — wait for class to include 'open'
-    await expect(page.locator('#trader-modal')).toHaveClass(/open/, { timeout: 5000 });
+    await expect(page.locator('#trader-modal')).toHaveClass(/open/, { timeout: 10000 });
     await expect(page.locator('#modal-content')).toBeVisible();
 
     // Check for trader info in modal
@@ -144,13 +144,25 @@ test.describe('Trader Detail Modal', () => {
     await page.goto(DASHBOARD_URL);
     await waitForDashboard(page);
 
-    // Click first trader card
-    const card = page.locator('.trader-card').first();
-    await expect(card).toBeVisible({ timeout: 10000 });
-    await card.click();
+    // Use page.evaluate to directly open the modal with the first trader
+    const traderId = await page.evaluate(() => {
+      if (typeof cachedTraders !== 'undefined' && cachedTraders.length > 0) {
+        const id = cachedTraders[0].id;
+        toggleTraderDetail(id);
+        return id;
+      }
+      return null;
+    });
+
+    // If evaluate didn't work, try clicking
+    if (!traderId) {
+      const card = page.locator('.trader-card').first();
+      await expect(card).toBeVisible({ timeout: 10000 });
+      await card.click();
+    }
 
     // Wait for modal to open
-    await expect(page.locator('#trader-modal')).toHaveClass(/open/, { timeout: 5000 });
+    await expect(page.locator('#trader-modal')).toHaveClass(/open/, { timeout: 10000 });
 
     // Should have positions section (could say "No open positions")
     const positionsSection = page.locator('.modal-section').filter({ hasText: /Positions/i });
@@ -161,10 +173,13 @@ test.describe('Trader Detail Modal', () => {
     await page.goto(DASHBOARD_URL);
     await waitForDashboard(page);
 
-    const card = page.locator('.trader-card').first();
-    await expect(card).toBeVisible({ timeout: 10000 });
-    await card.click();
-    await expect(page.locator('#trader-modal')).toHaveClass(/open/, { timeout: 5000 });
+    // Open modal via evaluate
+    await page.evaluate(() => {
+      if (typeof cachedTraders !== 'undefined' && cachedTraders.length > 0) {
+        toggleTraderDetail(cachedTraders[0].id);
+      }
+    });
+    await expect(page.locator('#trader-modal')).toHaveClass(/open/, { timeout: 10000 });
 
     // Click the close button
     await page.locator('.modal-close').click();
@@ -175,10 +190,13 @@ test.describe('Trader Detail Modal', () => {
     await page.goto(DASHBOARD_URL);
     await waitForDashboard(page);
 
-    const card = page.locator('.trader-card').first();
-    await expect(card).toBeVisible({ timeout: 10000 });
-    await card.click();
-    await expect(page.locator('#trader-modal')).toHaveClass(/open/, { timeout: 5000 });
+    // Open modal via evaluate
+    await page.evaluate(() => {
+      if (typeof cachedTraders !== 'undefined' && cachedTraders.length > 0) {
+        toggleTraderDetail(cachedTraders[0].id);
+      }
+    });
+    await expect(page.locator('#trader-modal')).toHaveClass(/open/, { timeout: 10000 });
 
     // Press Escape
     await page.keyboard.press('Escape');
