@@ -759,6 +759,8 @@ def api_vetoes():
 
 # ── API: /api/positions ────────────────────────────────────────────────────────
 
+LIVE_AGENTS = ["trader-kairos", "trader-aldridge", "trader-stonks"]
+
 @app.route("/api/positions")
 def api_positions():
     """Returns open positions with exit conditions for all traders."""
@@ -772,7 +774,9 @@ def api_positions():
                               p.holding_horizon_days, p.opened_at, p.status
                        FROM trader_positions p
                        WHERE p.status = 'open'
+                         AND p.agent_id = ANY(%s)
                        ORDER BY p.agent_id, p.ticker""",
+                    (LIVE_AGENTS,),
                 ).fetchall()
                 for r in rows:
                     positions.append(dict(r))
