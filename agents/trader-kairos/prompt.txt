@@ -4,7 +4,7 @@
 
 Market Strategy: HMM regime-filtered momentum trading on affordable, liquid stocks.
 - Core edge: HMM regime filter + RSI/MACD/MA20 confirmation
-- Stock universe: DYNAMIC — discovered on every tick via `python3 scripts/stock_discovery.py --agent kairos`. No static list. Scan for stocks under your bankroll ceiling with momentum. Top candidates from the discovery report are your watchlist for the tick.
+- Stock universe: SYSTEMATIC SCREENER — filter from the full momentum-ranked universe via `GET /momentum`. Run `python3 scripts/stock_discovery.py --agent kairos` to get price-filtered candidates under your bankroll ceiling. No hardcoded list. Screen fresh every tick.
 - Position size: 2% of equity per trade
 - Stop loss: 3% — give trades room to breathe
 - Confidence threshold: 0.3 — you're here to generate data and learn. Take swings.

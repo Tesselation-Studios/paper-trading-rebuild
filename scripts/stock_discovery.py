@@ -102,7 +102,12 @@ def discover_stocks(
     top_n: int = 10,
     include_technical: bool = False,
 ) -> Dict[str, Any]:
-    """Discover stocks that fit within the bankroll ceiling.
+    """Stock screener for Kairos — systematic discovery from momentum-ranked universe.
+
+    Primary source: GET /momentum cross-sectional ranking (data bus).
+    Secondary source: broad liquid universe (fintech, EV, retail, crypto, biotech, etc.)
+
+    Filters by price to fit bankroll ceiling, ranks by composite momentum score.
 
     Args:
         ceiling: Bankroll ceiling in dollars (portfolio × 0.01)
@@ -117,12 +122,14 @@ def discover_stocks(
     if max_price is None:
         max_price = ceiling / min_shares
 
-    # 1. Get quotes for core universe + momentum picks
+    # 1. Primary source: momentum-ranked universe from data bus
     momentum_data = fetch_momentum()
     momentum_picks = momentum_data.get("top_buys", [])
+    momentum_avoids = momentum_data.get("top_avoids", [])
 
-    all_symbols = list(set(CORE_UNIVERSE + momentum_picks))
-    quotes = fetch_quotes(all_symbols)
+    # 2. Build the screening universe: momentum picks + broad liquid universe
+    screen_universe = list(set(momentum_picks + CORE_UNIVERSE))
+    quotes = fetch_quotes(screen_universe)
 
     # 2. Filter by price
     candidates = []
@@ -183,6 +190,8 @@ def discover_stocks(
         "total_screened": len(candidates),
         "candidates": top_candidates,
         "momentum_regime": momentum_data.get("market_regime", "unknown"),
+        "momentum_top_buys": momentum_picks,
+        "momentum_avoids": momentum_avoids,
     }
 
 
@@ -235,8 +244,9 @@ def format_discovery_report(result: Dict[str, Any]) -> str:
     lines.append(f"# Stock Discovery Report")
     lines.append(f"Fetched: {result['fetched_at']}")
     lines.append(f"Bankroll ceiling: ${result['ceiling']:.2f} | Max price: ${result['max_price']:.2f}")
-    lines.append(f"Momentum regime: {result.get('momentum_regime', 'unknown')}")
+    lines.append(f"Momentum regime: {result.get('momentum_regime', 'unknown')} (from GET /momentum)")
     lines.append(f"Stocks screened: {result['total_screened']} | Showing: top {len(result['candidates'])}")
+    lines.append(f"Momentum top buys: {', '.join(result.get('momentum_top_buys', [])) or 'none within price range'}")
     lines.append("")
 
     if not result["candidates"]:
