@@ -1102,33 +1102,33 @@ function renderBenchmarks(benchmarks) {
   const spy = benchmarks.spy || {};
   const qqq = benchmarks.qqq || {};
   const cmp = benchmarks.comparisons || {};
-  let html = '<span style="font-size:11px;color:var(--muted);margin-right:12px">📊 Benchmarks</span>';
+  let html = '<span style="font-size:11px;color:var(--muted);margin-right:12px">📊</span>';
   if (spy.price != null) {
-    html += `<span style="margin-right:12px;display:inline-block;padding:2px 8px;border-radius:4px;background:rgba(88,166,255,0.1);border:1px solid rgba(88,166,255,0.2)"><b>SPY</b> \$${spy.price.toFixed(2)}</span>`;
+    html += `<span style="margin-right:8px;display:inline-block;padding:2px 8px;border-radius:4px;background:rgba(88,166,255,0.1);border:1px solid rgba(88,166,255,0.2)"><b>SPY</b> $${spy.price.toFixed(2)}</span>`;
   }
   if (qqq.price != null) {
-    html += `<span style="margin-right:12px;display:inline-block;padding:2px 8px;border-radius:4px;background:rgba(63,185,80,0.1);border:1px solid rgba(63,185,80,0.2)"><b>QQQ</b> \$${qqq.price.toFixed(2)}</span>`;
+    html += `<span style="margin-right:8px;display:inline-block;padding:2px 8px;border-radius:4px;background:rgba(63,185,80,0.1);border:1px solid rgba(63,185,80,0.2)"><b>QQQ</b> $${qqq.price.toFixed(2)}</span>`;
   }
-  // Show agent comparisons as mini-bars
+  // Show agent comparisons as compact bars
   const agents = Object.keys(cmp);
-  if (agents.length > 0) {
-    agents.forEach(aid => {
-      const a = cmp[aid];
-      if (a && a.spy_excess != null) {
-        const cls = a.spy_excess >= 0 ? 'positive' : 'negative';
-        const barWidth = Math.min(100, Math.abs(a.spy_excess) * 1000);
-        const barColor = a.spy_excess >= 0 ? 'var(--green)' : 'var(--red)';
-        const shortName = aid.replace('trader-', '');
-        html += `<div style="display:inline-flex;align-items:center;gap:4px;font-size:11px;margin-right:12px">
-          <span style="color:var(--muted)">${shortName}</span>
-          <div style="width:60px;height:8px;background:var(--surface2);border-radius:4px;overflow:hidden">
-            <div style="width:${barWidth}%;height:100%;background:${barColor};border-radius:4px"></div>
-          </div>
-          <span class="${cls}">${(a.spy_excess * 100).toFixed(2)}%</span>
-        </div>`;
-      }
-    });
-  }
+  agents.forEach(aid => {
+    const a = cmp[aid];
+    if (a && a.spy_excess != null) {
+      const cls = a.spy_excess >= 0 ? 'positive' : 'negative';
+      const barWidth = Math.min(100, Math.abs(a.spy_excess) * 500);
+      const barColor = a.spy_excess >= 0 ? 'var(--green)' : 'var(--red)';
+      const shortName = aid.replace('trader-', '');
+      html += `<span style="display:inline-flex;align-items:center;gap:3px;font-size:10px;margin-right:8px">
+        <span style="color:var(--muted)">${shortName}</span>
+        <span style="display:inline-flex;align-items:center;gap:2px">
+          <span style="display:inline-block;width:50px;height:6px;background:var(--surface2);border-radius:3px;overflow:hidden">
+            <span style="display:block;width:${barWidth}%;height:100%;background:${barColor};border-radius:3px"></span>
+          </span>
+          <span class="${cls}">${fmtPct(a.spy_excess * 100)}</span>
+        </span>
+      </span>`;
+    }
+  });
   el.innerHTML = html || '';
 }
 
@@ -1193,8 +1193,9 @@ function renderTraders(traders) {
     const bm = t.benchmark_comparison || {};
     const spyClass = bm.spy_excess != null ? (bm.spy_excess >= 0 ? 'positive' : 'negative') : '';
     const spyLine = bm.spy_excess != null
-      ? `<div style="font-size:11px;color:var(--muted);margin-top:4px">
+      ? `<div style="font-size:11px;color:var(--muted);margin-top:4px;padding:2px 0">
            vs SPY: <span class="${spyClass}">${fmtPct(bm.spy_excess * 100)}</span>
+           <span style="color:var(--muted)"> · Agent: ${fmtPct(bm.agent_return * 100)} vs SPY: ${fmtPct(bm.spy_return * 100)}</span>
          </div>`
       : '';
 

@@ -124,6 +124,8 @@ def _seconds_ago(ts: str) -> Optional[int]:
 def _is_option_symbol(symbol: str) -> bool:
     """Detect OCC option symbols: ROOT+YYMMDD+C/P+STRIKE*1000."""
     import re
+    if not symbol or not isinstance(symbol, str):
+        return False
     # OCC format: 1-6 char root + 6-digit date + C/P + 8-digit strike*1000
     return bool(re.match(r'^[A-Z]{1,6}\d{6}[CP]\d{8}$', symbol))
 
@@ -161,50 +163,42 @@ def _get_portfolio_from_db(company: str) -> Optional[dict]:
 
 def _get_alpaca_portfolio(company: str) -> Optional[dict]:
     """
-    Fetch portfolio data — DB snapshot first, live Alpaca fallback.
+    Fetch portfolio data — live Alpaca first, DB snapshot fallback.
     
-    1. If a recent DB snapshot exists (< 5 min old), use its values.
-    2. If stale or missing, query Alpaca live.
-    3. If Alpaca fails too, fall back to the stale snapshot (better than zeros).
+    Uses the alpaca-py TradingClient directly to fetch account data
+    and open positions. Falls back to portfolio_snapshots table if
+    Alpaca is unavailable.
     
-    Positions are always fetched from Alpaca live when possible.
     Returns dict with cash, portfolio_value, buying_power, positions, _source.
     Returns None if no data is available from any source.
     """
-    snap = _get_portfolio_from_db(company)
-    snap_recent = (
-        snap
-        and snap.get("snapshot_ts")
-        and _seconds_ago(snap["snapshot_ts"]) is not None
-        and _seconds_ago(snap["snapshot_ts"]) < 300
-    )
-
-    # ── always try Alpaca for positions ──
-    live_data = None
+    from alpaca.trading.client import TradingClient
+    
     positions = []
-    try:
-        import sys
-        sys.path.insert(0, str(ROOT))
-        from src.execute import AlpacaExecutor
+    live_data = None
 
+    try:
         api_key_env, secret_env = _CRED_MAP[company]
-        # Prefer ALPACA_*_KEY naming (from ~/.openclaw/.env) over old-style names
         api_key = (os.getenv(f"ALPACA_{company.upper()}_KEY")
                    or os.getenv(api_key_env))
         secret  = (os.getenv(f"ALPACA_{company.upper()}_SECRET")
                    or os.getenv(secret_env))
         if not api_key or not secret:
-            return None
+            raise ValueError(f"No credentials for {company}")
 
-        executor = AlpacaExecutor(api_key, secret, company)
-        data = executor.get_account_value()
-        if data is None:
-            return None
+        client = TradingClient(api_key, secret, paper=True)
+        acct = client.get_account()
 
-        # Fetch open positions so the UI can show what each trader holds
-        positions = []
+        live_data = {
+            "cash": float(acct.cash),
+            "portfolio_value": float(acct.equity),
+            "buying_power": float(acct.buying_power),
+            "_source": "alpaca_live",
+        }
+
+        # Fetch open positions
         try:
-            for p in executor.client.get_all_positions():
+            for p in client.get_all_positions():
                 pl_pct = float(p.unrealized_plpc) * 100
                 positions.append({
                     "ticker":          p.symbol,
@@ -218,63 +212,41 @@ def _get_alpaca_portfolio(company: str) -> Optional[dict]:
         except Exception:
             pass
 
-        # Merge exit conditions from local positions table
+        # Merge exit conditions from local trader_positions table
         if positions:
             try:
                 agent_id = f"trader-{company}"
                 with _db() as conn:
-                    if conn:
-                        for pos in positions:
-                            row = conn.execute(
-                                """SELECT exit_condition, holding_horizon_days, stop_loss
-                                   FROM trader_positions
-                                   WHERE agent_id = %s AND ticker = %s AND status = 'open'""",
-                                (agent_id, pos["ticker"]),
-                            ).fetchone()
-                            if row:
-                                pos["exit_condition"] = row["exit_condition"] or ""
-                                pos["holding_horizon_days"] = row["holding_horizon_days"]
-                                if row["stop_loss"] and not pos.get("stop_loss"):
-                                    pos["stop_loss"] = float(row["stop_loss"])
+                    for pos in positions:
+                        row = conn.execute(
+                            """SELECT exit_condition, holding_horizon_days, stop_loss
+                               FROM trader_positions
+                               WHERE agent_id = %s AND ticker = %s AND status = 'open'""",
+                            (agent_id, pos["ticker"]),
+                        ).fetchone()
+                        if row:
+                            pos["exit_condition"] = row["exit_condition"] or ""
+                            pos["holding_horizon_days"] = row["holding_horizon_days"]
+                            if row["stop_loss"] and not pos.get("stop_loss"):
+                                pos["stop_loss"] = float(row["stop_loss"])
             except Exception:
                 pass
 
-        data["positions"] = positions
-        return data
+        live_data["positions"] = positions
+        return live_data
     except Exception:
         pass
 
-    # ── decide which values to return ──
-    if snap_recent:
-        # Recent snapshot available — prefer it for account values
-        result = {
-            "cash": snap["cash"],
-            "portfolio_value": snap["portfolio_value"],
-            "buying_power": live_data.get("buying_power") if live_data else None,
-            "unrealized_pl": snap["unrealized_pl"],
-            "daily_pnl": snap["daily_pnl"],
-            "positions": positions,
-            "_source": "db_snapshot",
-        }
-        return result
-
-    if live_data:
-        # Live Alpaca succeeded
-        live_data["positions"] = positions
-        live_data["_source"] = "alpaca_live"
-        live_data["unrealized_pl"] = snap["unrealized_pl"] if snap else 0
-        live_data["daily_pnl"] = snap["daily_pnl"] if snap else 0
-        return live_data
-
+    # ── Fall back to DB snapshot ──
+    snap = _get_portfolio_from_db(company)
     if snap:
-        # Alpaca failed — use stale snapshot as fallback
         return {
             "cash": snap["cash"],
             "portfolio_value": snap["portfolio_value"],
             "buying_power": None,
             "unrealized_pl": snap["unrealized_pl"],
             "daily_pnl": snap["daily_pnl"],
-            "positions": [],
+            "positions": positions,
             "_source": "stale_snapshot",
         }
 
@@ -327,52 +299,95 @@ def _parse_decisions(company: str) -> list:
 # ── Benchmark helpers ────────────────────────────────────────────────────────
 
 def _get_benchmark_data() -> dict:
-    """Get current SPY/QQQ prices from market_data.bars.
+    """Get current SPY/QQQ prices and compute benchmark comparisons.
+
+    For each trader, compares actual portfolio return to what they'd have
+    if all $10,000 were invested in SPY or QQQ at the earliest available
+    price in market_data.bars.
 
     Returns:
         {
-            "spy": {"price": 733.24},
-            "qqq": {"price": 710.62},
-            "comparisons": {}
+            "spy": {"price": 751.94},
+            "qqq": {"price": 719.71},
+            "comparisons": {
+                "trader-kairos": {
+                    "agent_return": -0.07,
+                    "spy_return": 0.02,
+                    "qqq_return": 0.01,
+                    "spy_excess": -0.09,  # agent is 9% worse than SPY
+                    "period_start": "2026-05-11",
+                    "period_end": "2026-07-15"
+                },
+                ...
+            }
         }
     """
+    STARTING_CAPITAL = 10_000.0
     data = {"spy": None, "qqq": None, "comparisons": {}}
     try:
         with _db() as conn:
             if not conn:
                 return data
 
-            # Latest SPY/QQQ close prices from market_data.bars
+            # Get earliest and latest SPY/QQQ prices from market_data.bars
+            index_prices = {}
             for ticker in ["SPY", "QQQ"]:
+                cur = conn.execute(
+                    "SELECT close, timestamp FROM market_data.bars WHERE ticker = %s ORDER BY timestamp ASC LIMIT 1",
+                    (ticker,),
+                )
+                first = cur.fetchone()
                 cur = conn.execute(
                     "SELECT close FROM market_data.bars WHERE ticker = %s ORDER BY timestamp DESC LIMIT 1",
                     (ticker,),
                 )
-                row = cur.fetchone()
-                if row:
+                last = cur.fetchone()
+                if first and last:
                     key = ticker.lower()
-                    data[key] = {"price": round(float(row["close"]), 2)}
+                    data[key] = {"price": round(float(last["close"]), 2)}
+                    index_prices[ticker] = {
+                        "first_close": float(first["close"]),
+                        "first_date": str(first["timestamp"])[:10],
+                        "last_close": float(last["close"]),
+                    }
 
-            # Benchmark comparisons (table doesn't exist yet — compute from equity_snapshots)
+            # Compute benchmark comparisons for each trader
             for aid in ["trader-kairos", "trader-aldridge", "trader-stonks"]:
                 try:
-                    spy_price = data["spy"]["price"] if data.get("spy") else None
-                    # Compare vs latest equity snapshot
+                    # Latest portfolio value from portfolio_snapshots
                     cur = conn.execute(
-                        """SELECT equity FROM equity_snapshots
-                           WHERE trader_id = %s ORDER BY date DESC LIMIT 1""",
+                        """SELECT portfolio_value, timestamp FROM portfolio_snapshots
+                           WHERE trader_id = %s ORDER BY timestamp DESC LIMIT 1""",
                         (aid,),
                     )
                     row = cur.fetchone()
-                    if row and spy_price:
-                        data["comparisons"][aid] = {
-                            "agent_return": round(float(row["equity"] / 10000.0 - 1), 4),
-                            "spy_return": round(spy_price / 530.0 - 1, 4),  # rough baseline
-                            "qqq_return": None,
-                            "spy_excess": None,
-                            "period_start": None,
-                            "period_end": None,
-                        }
+                    if not row:
+                        continue
+
+                    equity = float(row["portfolio_value"])
+                    agent_return = equity / STARTING_CAPITAL - 1.0
+                    period_end = str(row["timestamp"])[:10]
+
+                    # Compute index returns and excess
+                    spy_data = index_prices.get("SPY")
+                    qqq_data = index_prices.get("QQQ")
+                    spy_ret = (spy_data["last_close"] / spy_data["first_close"] - 1.0) if spy_data else None
+                    qqq_ret = (qqq_data["last_close"] / qqq_data["first_close"] - 1.0) if qqq_data else None
+                    spy_exc = round(agent_return - spy_ret, 4) if spy_ret is not None else None
+                    qqq_exc = round(agent_return - qqq_ret, 4) if qqq_ret is not None else None
+                    period_start = spy_data["first_date"] if spy_data else None
+
+                    data["comparisons"][aid] = {
+                        "agent_return": round(agent_return, 4),
+                        "spy_return": round(spy_ret, 4) if spy_ret is not None else None,
+                        "qqq_return": round(qqq_ret, 4) if qqq_ret is not None else None,
+                        "spy_excess": spy_exc,
+                        "qqq_excess": qqq_exc,
+                        "agent_value": round(equity, 2),  # actual portfolio value
+                        "spy_value": round(STARTING_CAPITAL * (1 + (spy_ret or 0)), 2),  # what SPY buy-hold would be worth
+                        "period_start": period_start,
+                        "period_end": period_end,
+                    }
                 except Exception:
                     pass
     except Exception:
@@ -516,14 +531,34 @@ def _get_trade_stats(company: str) -> dict:
     return result
 
 def _get_last_activity(company: str) -> str | None:
-    """Get the most recent journal entry timestamp for a trader from the shared DB."""
+    """Get the most recent journal entry timestamp for a trader from the shared DB.
+
+    Returns a valid ISO timestamp if possible, or None if the timestamp
+    is malformed (e.g. 'journalT12:29:00' format without a date).
+    """
     try:
         with _db() as conn:
             row = conn.execute(
                 "SELECT MAX(timestamp) as max_ts FROM trader_journal WHERE agent_id=%s",
                 (f"trader-{company}",),
             ).fetchone()
-        return row["max_ts"] if row else None
+        ts = row["max_ts"] if row else None
+        if ts:
+            # Validate — ensure it's a real ISO date, not 'journalT12:29:00'
+            try:
+                dt = datetime.fromisoformat(ts)
+                return ts  # valid ISO date
+            except (ValueError, TypeError):
+                # Try to extract just the time portion for display
+                # Format: journalT12:29:00 or T12:29:00
+                if isinstance(ts, str) and "T" in ts:
+                    time_part = ts.split("T")[-1]
+                    if time_part and time_part.count(":") == 2:
+                        # Return just the time as a string that won't break Date()
+                        # We'll use a fake date so the frontend can format it
+                        return f"2026-07-15T{time_part}"
+                return None  # Can't parse, hide it
+        return None
     except Exception:
         return None
 
