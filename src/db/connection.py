@@ -1,4 +1,5 @@
 """asyncpg connection pool for paper trading database."""
+import os
 import asyncpg
 from typing import Optional
 
