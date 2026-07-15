@@ -28,7 +28,7 @@ AGENT_IDS = {t: f"trader-{t}" for t in TRADERS}
 
 PG_DSN = os.getenv(
     "PG_DSN",
-    "host=trading-db port=5432 dbname=trading user=trader",
+    "host=192.168.1.179 port=5433 dbname=trading user=trader",
 )
 
 WORKSPACE_ROOT = Path(os.getenv("OPENCLAW_HOME", "/home/openclaw")) / ".openclaw"
@@ -442,6 +442,15 @@ def main():
                 journal_decisions.extend(decisions)
                 if decisions:
                     print(f"    Found {len(decisions)} decisions in {jf.name}")
+        
+        # Also check agent-level journal.md (primary journal on .41)
+        agent_journal = WORKSPACE_ROOT / f"agents/trader-{trader}/journal.md"
+        if agent_journal.exists():
+            print(f"  Agent journal: {agent_journal}")
+            decisions = parse_journal_for_decisions(agent_journal)
+            if decisions:
+                print(f"    Found {len(decisions)} decisions in agent journal.md")
+                journal_decisions.extend(decisions)
 
         # Merge: JSONL decisions take precedence, journal decisions fill gaps
         all_decisions = jsonl_decisions + journal_decisions

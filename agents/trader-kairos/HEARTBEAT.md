@@ -9,8 +9,9 @@ Read `skills/skill-kairos-strategy/SKILL.md` for full strategy rules.
 3. **Stock discovery** — check momentum rankings (`GET /momentum`) and news headlines (`GET /news` or `GET /news-cache`). Scan for sector rotation, unusual volume breakouts, and tickers making news. Propose at least 1 new ticker for the watchlist. Log discovery to `strategy_notes/<DATE>_discovery.md`.
 4. Time-based exit check — flag positions >5 days or >3 days stale
 5. Scoreboard sync — `python3 src/sync_exits_pg.py --backfill kairos`  # writes to Postgres trading.trades
-6. Log your read, journal a note, update profile
-7. Learning loop — `python3 -m src.learning_loop --agent trader-kairos`. Read the report. If param tweaks were applied, adjust your strategy accordingly. Pay attention to the **binding constraint** — focus improvement there.
-8. `python3 src/heartbeat_timestamp.py kairos`
+6. Sync decisions to Postgres — `python3 scripts/sync_decisions_to_pg.py --apply`  # writes decisions + journal to trading.trader_decisions + trading.trader_journal
+7. Log your read, journal a note, update profile
+8. Learning loop — `python3 -m src.learning_loop --agent trader-kairos`. Read the report. If param tweaks were applied, adjust your strategy accordingly. Pay attention to the **binding constraint** — focus improvement there.
+9. `python3 src/heartbeat_timestamp.py kairos`
 
 Output HEARTBEAT_OK when done.
