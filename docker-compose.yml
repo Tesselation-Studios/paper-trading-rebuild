@@ -7,8 +7,6 @@ services:
     image: pgvector/pgvector:pg15
     container_name: trading-db
     restart: unless-stopped
-    dns:
-      - 192.168.1.25
     ports:
       - "5433:5432"
     environment:
@@ -34,8 +32,6 @@ services:
     restart: unless-stopped
     ports:
       - "5000:5000"
-    dns:
-      - 192.168.1.25
     environment:
       - PYTHONUNBUFFERED=1
       - ALPACA_KAIROS_KEY=${ALPACA_KAIROS_KEY}
@@ -79,8 +75,6 @@ services:
     restart: unless-stopped
     ports:
       - "5004:5004"
-    dns:
-      - 192.168.1.25
     environment:
       - PG_DSN=host=trading-db port=5432 dbname=trading user=trader
       - PYTHONUNBUFFERED=1
@@ -103,8 +97,6 @@ services:
       dockerfile: Dockerfile
     container_name: trading-virtual-runner
     restart: unless-stopped
-    dns:
-      - 192.168.1.25
     environment:
       - VT_DB_DSN=host=trading-db port=5432 dbname=trading user=trader
       - VT_DATA_BUS_URL=http://data-bus:5000
