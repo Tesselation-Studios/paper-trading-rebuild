@@ -52,6 +52,7 @@ def api_trades():
         "pnl, entry_time, exit_time, status "
         "FROM trading.executed_trades "
         "WHERE entry_time > now() - interval '7 days' "
+        "AND agent_id IN ('trader-kairos', 'trader-aldridge', 'trader-stonks') "
         "ORDER BY entry_time DESC LIMIT 200")
     rows = cur.fetchall()
     conn.close()
@@ -68,6 +69,8 @@ def api_decisions():
         "SELECT agent_id, ticker, action, conviction, thesis, timestamp "
         "FROM trading.decisions "
         "WHERE timestamp > now() - interval '24 hours' "
+        "AND agent_id IN ('trader-kairos', 'trader-aldridge', 'trader-stonks') "
+        "AND action != 'HOLD' "
         "ORDER BY timestamp DESC LIMIT 100")
     rows = cur.fetchall()
     conn.close()
@@ -82,6 +85,7 @@ def api_pnl():
         "count(*) as trades, round(sum(coalesce(pnl,0))::numeric, 2) as pnl "
         "FROM trading.executed_trades "
         "WHERE entry_time > now() - interval '30 days' "
+        "AND agent_id IN ('trader-kairos', 'trader-aldridge', 'trader-stonks') "
         "GROUP BY 1,2 ORDER BY 2 desc, 1")
     rows = cur.fetchall()
     conn.close()

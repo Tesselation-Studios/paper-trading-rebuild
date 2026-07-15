@@ -868,6 +868,52 @@ def api_activity():
     return jsonify({"events": out})
 
 
+# ── API: /api/decisions ────────────────────────────────────────────────────────
+
+@app.route("/api/decisions")
+def api_decisions():
+    """Returns structured decision data from all three traders, newest first.
+
+    Alias for /api/activity with a different response shape — returns decisions
+    directly without nesting them in an 'events' key.
+    """
+    limit = int(request.args.get("limit", 100))
+
+    all_events = []
+    for company in ["kairos", "aldridge", "stonks"]:
+        all_events.extend(_parse_decisions(company))
+
+    all_events.sort(key=lambda e: e.get("timestamp", ""), reverse=True)
+    return jsonify(all_events[:limit])
+
+
+# ── API: /api/pnl ─────────────────────────────────────────────────────────────
+
+@app.route("/api/pnl")
+def api_pnl():
+    """Returns daily PnL breakdown per trader from executed_trades.
+
+    Queries the trading.executed_trades table, groups by trader and day.
+    """
+    import psycopg2.extras
+    rows = []
+    with _db() as conn:
+        if conn:
+            try:
+                cur = conn.execute(
+                    """SELECT agent_id, date(entry_time) as day,
+                              count(*) as trades,
+                              round(sum(coalesce(pnl,0))::numeric, 2) as pnl
+                       FROM trading.executed_trades
+                       WHERE entry_time > now() - interval '30 days'
+                       GROUP BY 1,2 ORDER BY 2 DESC, 1"""
+                )
+                rows = [dict(r) for r in cur.fetchall()]
+            except Exception:
+                pass
+    return jsonify(rows)
+
+
 # ── API: /api/journal ─────────────────────────────────────────────────────────
 
 @app.route("/api/journal")
