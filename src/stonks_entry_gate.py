@@ -132,11 +132,8 @@ def get_current_bankroll_state(agent: str = "stonks") -> dict:
             state["portfolio_value"] = float(row[0])
         cur.close()
         conn.close()
-    except Exception:
-        pass
-
-    # Calculate ceiling
-    state["ceiling"] = round(state["portfolio_value"] * 0.01, 2)
+    except Exception as e:
+        logger.debug("Failed to load portfolio from PG for %s: %s", agent, e)
 
     # Get open positions from PG
     try:
@@ -161,8 +158,8 @@ def get_current_bankroll_state(agent: str = "stonks") -> dict:
             state["deployed"] += cost
         cur.close()
         conn.close()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Failed to load positions from PG for %s: %s", agent, e)
 
     return state
 
