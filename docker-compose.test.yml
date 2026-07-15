@@ -1,0 +1,108 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Test Docker Compose — Paper Trading Rebuild
+#
+# Standalone CI stack with:
+#   - PostgreSQL (trading-db)
+#   - Seed service (populates test data)
+#   - Dashboard (leaderboard API + static frontend on :5002)
+#
+# Usage:
+#   docker compose -f docker-compose.test.yml up --build --abort-on-container-exit
+#   docker compose -f docker-compose.test.yml down -v
+#
+# The seed service runs once and exits. The dashboard stays up serving
+# synthetic data for Playwright/curl verification.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  # ── PostgreSQL ─────────────────────────────────────────────────────────────
+  trading-db:
+    image: postgres:15-alpine
+    container_name: test-trading-db
+    environment:
+      POSTGRES_DB: trading
+      POSTGRES_USER: trader
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trader -d trading"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    tmpfs: /var/lib/postgresql/data
+    networks:
+      - test-net
+
+  # ── Data Bus ───────────────────────────────────────────────────────────────
+  data-bus:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: test-data-bus
+    environment:
+      PYTHONUNBUFFERED: 1
+      PGHOST: trading-db
+      PGPORT: 5432
+      PGDATABASE: trading
+      PGUSER: trader
+      MCP_PORT: 5001
+    working_dir: /app
+    command: python3 src/data_bus.py --port 5000 --host 0.0.0.0
+    depends_on:
+      trading-db:
+        condition: service_healthy
+      seed:
+        condition: service_completed_successfully
+    networks:
+      - test-net
+
+  # ── Dashboard (Leaderboard) ────────────────────────────────────────────────
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: test-dashboard
+    environment:
+      PG_DSN: host=trading-db port=5432 dbname=trading user=trader
+      PYTHONUNBUFFERED: 1
+    working_dir: /app
+    command: python3 src/leaderboard_api.py --port 5002 --host 0.0.0.0
+    ports:
+      - "5002:5002"
+    depends_on:
+      trading-db:
+        condition: service_healthy
+      seed:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request, sys; r = urllib.request.urlopen('http://localhost:5002/api/traders'); sys.exit(0 if r.status == 200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+    networks:
+      - test-net
+
+  # ── Seed Service ───────────────────────────────────────────────────────────
+  seed:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: test-seed
+    environment:
+      PG_DSN: host=trading-db port=5432 dbname=trading user=trader
+      PYTHONUNBUFFERED: 1
+      PIP_NO_CACHE_DIR: 1
+    working_dir: /app
+    command: python3 scripts/seed_test_data.py
+    depends_on:
+      trading-db:
+        condition: service_healthy
+    networks:
+      - test-net
+
+networks:
+  test-net:
+    driver: bridge
