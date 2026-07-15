@@ -355,6 +355,7 @@ def seed_portfolio_snapshots(conn):
     """Insert recent portfolio snapshots for each trader."""
     cur = conn.cursor()
     for t in TRADERS:
+        trader_id = f"trader-{t['agent_id']}"
         pv = 10000.0 + random.uniform(-300, 1800)
         cash = pv * random.uniform(0.2, 0.6)
         unrel_pl = random.uniform(-200, 400)
@@ -364,7 +365,7 @@ def seed_portfolio_snapshots(conn):
             INSERT INTO trading.portfolio_snapshots
                 (trader_id, timestamp, cash, portfolio_value, unrealized_pl, daily_pnl, open_positions, source)
             VALUES (%s, %s, %s, %s, %s, %s, %s, 'db_snapshot')
-        """, (t["agent_id"], NOW - timedelta(seconds=random.randint(10, 120)),
+        """, (trader_id, NOW - timedelta(seconds=random.randint(10, 120)),
               round(cash, 2), round(pv, 2), round(unrel_pl, 2),
               round(daily_pnl, 2), positions))
     cur.close()
