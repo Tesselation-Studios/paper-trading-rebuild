@@ -19,7 +19,7 @@ from pathlib import Path
 import psycopg2
 
 # ── Config ──────────────────────────────────────────────────────────────────
-PG_HOST = "192.168.1.179"
+PG_HOST = os.getenv("PG_HOST", "trading-db")
 PG_PORT = 5433
 PG_DB = "trading"
 PG_USER = "trader"

@@ -22,9 +22,9 @@ Usage:
     python3 scripts/sync_bars_to_pg.py --tickers AAPL,MSFT,NVDA
 
 Environment:
-    DATA_BUS_URL   Data bus base URL (default: http://192.168.1.179:5000)
-    PG_HOST        Postgres host (default: 192.168.1.179)
-    PG_PORT        Postgres port (default: 5433)
+    DATA_BUS_URL   Data bus base URL (default: http://trading-db:5000)
+    PG_HOST        Postgres host (default: trading-db)
+    PG_PORT        Postgres port (default: 5432)
 """
 
 from __future__ import annotations
@@ -46,10 +46,10 @@ import json
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-DATA_BUS_URL = os.environ.get("DATA_BUS_URL", "http://192.168.1.179:5000")
+DATA_BUS_URL = os.environ.get("DATA_BUS_URL", "http://trading-db:5000")
 
-PG_HOST = os.environ.get("PG_HOST", "192.168.1.179")
-PG_PORT = int(os.environ.get("PG_PORT", "5433"))
+PG_HOST = os.environ.get("PG_HOST", "trading-db")
+PG_PORT = int(os.environ.get("PG_PORT", "5432"))
 PG_DB = os.environ.get("PG_DB", "trading")
 PG_USER = os.environ.get("PG_USER", "trader")
 PG_PASSWORD = os.environ.get("PG_PASSWORD", "")

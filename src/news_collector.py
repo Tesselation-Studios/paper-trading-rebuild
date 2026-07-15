@@ -151,7 +151,7 @@ def _get_dsn() -> str:
     """Build Postgres DSN from environment (same pattern as dual_writer)."""
     global _DSN
     if _DSN is None:
-        host = os.getenv("PGHOST", "192.168.1.179")
+        host = os.getenv("PGHOST", "trading-db")
         port = os.getenv("PGPORT", "5433")
         dbname = os.getenv("PGDATABASE", "trading")
         user = os.getenv("PGUSER", "trader")

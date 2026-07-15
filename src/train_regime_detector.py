@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.regime_detector import RegimeDetector
 
-DB_URL = "postgresql://trader:@192.168.1.179:5433/trading"
+DB_URL = os.getenv("TRAIN_DB_URL", "postgresql://trader:@trading-db:5432/trading")
 
 
 def fetch_spy_history(days: int = 730) -> list:
@@ -72,7 +72,7 @@ def main():
                         help="Compare against rule-based detector after training")
     args = parser.parse_args()
 
-    print(f"Connecting to Postgres: 192.168.1.179:5433/trading")
+    print(f"Connecting to Postgres: trading-db:5432/trading")
     print(f"Fetching up to {args.days} days of SPY history from market_data.bars_1d...")
     data = fetch_spy_history(args.days)
 

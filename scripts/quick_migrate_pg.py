@@ -6,7 +6,7 @@ Tables migrated: trades, decisions, journal, equity_snapshots
 import sqlite3, psycopg2, psycopg2.extras
 
 SQLITE = "/home/openclaw/projects/paper-trading-teams/shared/trader.db"
-PG_DSN = "postgresql://trader:***@192.168.1.179:5433/trading"
+PG_DSN = os.getenv("QUICK_MIGRATE_DB_URL", "postgresql://trader:***@trading-db:5432/trading")
 
 sl = sqlite3.connect(SQLITE)
 sl.row_factory = sqlite3.Row

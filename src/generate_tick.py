@@ -158,7 +158,7 @@ def get_portfolio_snapshot(trader: str) -> Dict[str, Any]:
     try:
         import psycopg2
         conn = psycopg2.connect(
-            host=os.getenv("DB_HOST", "192.168.1.179"),
+            host=os.getenv("DB_HOST", "trading-db"),
             port=int(os.getenv("DB_PORT", "5433")),
             dbname=os.getenv("DB_NAME", "trading"),
             user=os.getenv("DB_USER", "trader"),

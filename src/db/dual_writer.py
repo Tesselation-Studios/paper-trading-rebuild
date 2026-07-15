@@ -21,8 +21,8 @@ def _get_dsn() -> str:
     global _DSN
     if _DSN is None:
         import os as _os
-        host = _os.getenv("PGHOST", "192.168.1.179")
-        port = _os.getenv("PGPORT", "5433")
+        host = _os.getenv("PGHOST", "trading-db")
+        port = _os.getenv("PGPORT", "5432")
         dbname = _os.getenv("PGDATABASE", "trading")
         user = _os.getenv("PGUSER", "trader")
         pw = _os.getenv("PGPASSWORD", "")

@@ -37,8 +37,8 @@ import psycopg2.extras
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 
 # Postgres connection
-PG_DSN = os.getenv("PG_DSN", "host=192.168.1.179 port=5433 dbname=trading user=trader")
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://trader:@192.168.1.179:5433/trading")
+PG_DSN = os.getenv("PG_DSN", "host=trading-db port=5432 dbname=trading user=trader")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://trader:@trading-db:5432/trading")
 
 sys.path.insert(0, str(PROJECT_DIR))
 
@@ -53,7 +53,7 @@ from src.simulator import run_nightly_synthesis as sim_run_nightly_synthesis
 
 def get_db() -> psycopg2.extensions.connection:
     """Return a sync psycopg2 Postgres connection (NOT SQLite)."""
-    dsn = os.getenv("PG_DSN", "host=192.168.1.179 port=5433 dbname=trading user=trader")
+    dsn = os.getenv("PG_DSN", "host=trading-db port=5432 dbname=trading user=trader")
     conn = psycopg2.connect(dsn)
     conn.autocommit = True
     return conn

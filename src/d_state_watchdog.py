@@ -38,7 +38,7 @@ log = logging.getLogger("d_state_watchdog")
 # Default DB URL (can be overridden via env)
 DB_URL = os.environ.get(
     "PAPER_TRADING_DB_URL",
-    "postgresql://trader:***@192.168.1.179:5433/trading",
+    "postgresql://trader:***@trading-db:5432/trading",
 )
 
 # Trader tick intervals in minutes (from SPEC §4.1)

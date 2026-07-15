@@ -38,7 +38,7 @@ log = logging.getLogger("orchestrator")
 
 # ── Defaults ──────────────────────────────────────────────────────────────
 
-DB_DSN = "postgresql://trader:@192.168.1.179:5433/trading"
+DB_DSN = os.getenv("ORCH_DB_URL", "postgresql://trader:@trading-db:5432/trading")
 
 # Live traders — the 3 production-ish live traders.
 LIVE_TRADERS = ["kairos", "horizons", "meridian"]

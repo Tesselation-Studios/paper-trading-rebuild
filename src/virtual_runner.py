@@ -55,7 +55,7 @@ log = logging.getLogger("virtual_runner")
 # ── Config (mutable dict — CLI args can override) ─────────────────────────────
 
 _config: Dict[str, Any] = {
-    "db_dsn": os.getenv("VT_DB_DSN", "host=192.168.1.179 port=5433 dbname=trading user=trader"),
+    "db_dsn": os.getenv("VT_DB_DSN", "host=trading-db port=5432 dbname=trading user=trader"),
     "data_bus_url": os.getenv("VT_DATA_BUS_URL", "http://192.168.1.25:5000"),
     "model": os.getenv("VT_MODEL", "google/gemini-3.5-flash"),
     "interval": 300,  # seconds (5 min)

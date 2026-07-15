@@ -20,7 +20,7 @@ from pathlib import Path
 PARAMS_DIR = Path(__file__).resolve().parent.parent / "state"
 
 # Postgres connection (same as paper-trading-teams/src/db.py)
-PG_HOST = os.getenv("PGHOST", "docker.klo")
+PG_HOST = os.getenv("PGHOST", "trading-db")
 PG_PORT = os.getenv("PGPORT", "5433")
 PG_DB = os.getenv("PGDATABASE", "trading")
 PG_USER = os.getenv("PGUSER", "trader")

@@ -32,7 +32,7 @@ SQLITE_PATH = os.environ.get(
 )
 OPENCLAW_HOST = "192.168.1.41"
 OPENCLAW_USER = "openclaw"
-PG_HOST = "192.168.1.179"
+PG_HOST = os.getenv("PG_HOST", "trading-db")
 PG_PORT = 5433
 PG_DB = "trading"
 PG_USER = "trader"

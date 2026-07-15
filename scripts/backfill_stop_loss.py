@@ -20,7 +20,7 @@ from pathlib import Path
 
 # ── DB config ────────────────────────────────────────────────────────────────
 
-DB_HOST = os.environ.get("DOCKER_HOST", "192.168.1.179")
+DB_HOST = os.environ.get("DB_HOST", "trading-db")
 DB_PORT = int(os.environ.get("POSTGRES_PORT", "5433"))
 DB_NAME = "trading"
 DB_USER = "trader"

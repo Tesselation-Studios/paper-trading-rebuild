@@ -6,7 +6,7 @@ import psycopg2, psycopg2.extras
 from flask import Flask, jsonify
 
 app = Flask(__name__)
-PG_DSN = os.getenv("PG_DSN", "host=192.168.1.179 port=5433 dbname=trading user=trader")
+PG_DSN = os.getenv("PG_DSN", "host=trading-db port=5432 dbname=trading user=trader")
 
 TRADER_META = [
     {"id": "trader-kairos",   "name": "Kairós Capital",     "manager": "Zara Chen"},

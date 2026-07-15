@@ -36,7 +36,7 @@ REPO_DIR = Path(__file__).resolve().parent.parent
 PROMPTS_DIR = REPO_DIR / "prompts"
 
 # Postgres connection for journal reads
-PG_DSN = os.getenv("PG_DSN", "host=192.168.1.179 port=5433 dbname=trading user=trader")
+PG_DSN = os.getenv("PG_DSN", "host=trading-db port=5432 dbname=trading user=trader")
 
 # Default stock universe per trader (kept in sync with prompts/*.txt)
 STOCK_UNIVERSES = {
@@ -114,7 +114,7 @@ def get_journal_entries(db_path: str | None, trader_id: str, n: int = 5) -> list
         List of journal entry dicts with 'content' and 'created_at' keys.
     """
     agent_id = f"trader-{trader_id}" if not trader_id.startswith("trader-") else trader_id
-    dsn = os.getenv("PG_DSN", "host=192.168.1.179 port=5433 dbname=trading user=trader")
+    dsn = os.getenv("PG_DSN", "host=trading-db port=5432 dbname=trading user=trader")
     try:
         conn = psycopg2.connect(dsn)
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)

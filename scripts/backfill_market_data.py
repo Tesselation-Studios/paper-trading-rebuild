@@ -33,8 +33,8 @@ from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 # ── Config ────────────────────────────────────────────────────────────────────
 
 # Postgres connection (docker.klo external port)
-PG_HOST = os.environ.get("PG_HOST", "192.168.1.179")
-PG_PORT = int(os.environ.get("PG_PORT", "5433"))
+PG_HOST = os.environ.get("PG_HOST", "trading-db")
+PG_PORT = int(os.environ.get("PG_PORT", "5432"))
 PG_DB = os.environ.get("PG_DB", "trading")
 PG_USER = os.environ.get("PG_USER", "trader")
 PG_DSN = f"host={PG_HOST} port={PG_PORT} dbname={PG_DB} user={PG_USER}"

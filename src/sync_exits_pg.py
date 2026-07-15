@@ -23,7 +23,7 @@ import psycopg2
 import psycopg2.extras
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
-PG_DSN = os.getenv("PG_DSN", "host=192.168.1.179 port=5433 dbname=trading user=trader")
+PG_DSN = os.getenv("PG_DSN", "host=trading-db port=5432 dbname=trading user=trader")
 
 load_dotenv(Path.home() / ".openclaw" / ".env", override=True)
 local_env = PROJECT_DIR / ".env"

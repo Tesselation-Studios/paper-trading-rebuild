@@ -33,7 +33,7 @@ import sqlite3
 # ── Project paths ────────────────────────────────────────────────────────────
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 AGENTS_DIR = PROJECT_DIR / "agents"
-DB_DSN = "postgresql://trader:***@192.168.1.179:5433/trading"
+DB_DSN = "postgresql://trader:***@trading-db:5432/trading"
 
 # ── Import from prompt_sweep ─────────────────────────────────────────────────
 _SRC_DIR = str(Path(__file__).resolve().parent)

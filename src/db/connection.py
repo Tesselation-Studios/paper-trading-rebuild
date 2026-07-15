@@ -2,7 +2,7 @@
 import asyncpg
 from typing import Optional
 
-DB_URL = "postgresql://trader:@192.168.1.179:5433/trading"
+DB_URL = os.getenv("DB_URL", "postgresql://trader:@trading-db:5432/trading")
 
 _pool: Optional[asyncpg.Pool] = None
 
@@ -47,7 +47,7 @@ async def fetchrow(sql: str, *args):
 import psycopg2
 import psycopg2.extras
 
-_SYNC_URL = "postgresql://trader:@192.168.1.179:5433/trading"
+_SYNC_URL = os.getenv("SYNC_DB_URL", "postgresql://trader:@trading-db:5432/trading")
 
 
 def get_connection():

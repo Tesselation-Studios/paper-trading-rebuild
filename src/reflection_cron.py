@@ -43,7 +43,7 @@ log = logging.getLogger("reflection")
 # ── Postgres connection ──────────────────────────────────────────────────────
 _DB_DSN = os.getenv(
     "REFLECTION_DB_DSN",
-    "host=docker.klo port=5433 dbname=trading user=trader",
+    "host=trading-db port=5432 dbname=trading user=trader",
 )
 
 _KNOWN_SECTORS: Dict[str, str] = {

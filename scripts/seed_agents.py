@@ -11,7 +11,7 @@ import psycopg2
 import psycopg2.extras
 
 # Postgres connection
-PG_DSN = os.getenv("PG_DSN", "host=192.168.1.179 port=5433 dbname=trading user=trader")
+PG_DSN = os.getenv("PG_DSN", "host=trading-db port=5432 dbname=trading user=trader")
 
 # SQLite fallback path
 SQLITE_DB = Path(__file__).resolve().parent.parent / "shared" / "trader.db"
@@ -110,7 +110,7 @@ PROFILES = {
 def seed_postgres():
     """Seed agent profiles into Postgres trading.agent_profile."""
     try:
-        dsn = os.getenv("PG_DSN", "host=192.168.1.179 port=5433 dbname=trading user=trader")
+        dsn = os.getenv("PG_DSN", "host=trading-db port=5432 dbname=trading user=trader")
         conn = psycopg2.connect(dsn)
         cur = conn.cursor()
 

@@ -32,8 +32,8 @@ log = logging.getLogger("tick_producer")
 
 # ── Defaults ──────────────────────────────────────────────────────────────
 
-DB_DSN = "postgresql://trader:@192.168.1.179:5433/trading"
-DATA_BUS_URL = "http://docker.klo:5000/quotes"  # data bus endpoint for current quotes
+DB_DSN = os.getenv("TICK_DB_URL", "postgresql://trader:@trading-db:5432/trading")
+DATA_BUS_URL = os.getenv("DATA_BUS_URL", "http://localhost:5000/quotes")  # data bus endpoint for current quotes
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:

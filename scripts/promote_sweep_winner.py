@@ -35,7 +35,7 @@ log = logging.getLogger("promote_sweep_winner")
 
 # ── Defaults ──────────────────────────────────────────────────────────────
 
-DB_DSN = "postgresql://trader:@192.168.1.179:5433/trading"
+DB_DSN = os.getenv("SWEEP_WINNER_DB_URL", "postgresql://trader:@trading-db:5432/trading")
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 SWEEP_RESULTS_JSON = PROJECT_DIR / "results" / "sweep_results.json"
 

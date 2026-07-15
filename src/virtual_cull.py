@@ -44,7 +44,7 @@ log = logging.getLogger("virtual_cull")
 # Config
 # ═══════════════════════════════════════════════════════════════════════════════
 
-DB_DSN = os.getenv("VT_DB_DSN", "host=docker.klo port=5433 dbname=trading user=trader")
+DB_DSN = os.getenv("VT_DB_DSN", "host=trading-db port=5432 dbname=trading user=trader")
 BASE_TRADERS = ["kairos", "aldridge", "stonks"]
 
 DEFAULT_CULL_COUNT = 3

@@ -54,7 +54,7 @@ log = logging.getLogger("promote_virtual_to_live")
 
 # ── Defaults ──────────────────────────────────────────────────────────────
 
-DB_DSN = "postgresql://trader:@192.168.1.179:5433/trading"
+DB_DSN = os.getenv("PROMOTE_LIVE_DB_URL", "postgresql://trader:@trading-db:5432/trading")
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 AGENTS_DIR = PROJECT_DIR / "agents"
 ARCHIVE_DIR = PROJECT_DIR / "archive" / "trader_configs"
