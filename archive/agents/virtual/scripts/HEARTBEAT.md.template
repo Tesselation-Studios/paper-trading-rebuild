@@ -1,0 +1,40 @@
+# Virtual Competitor Heartbeat
+
+This is a VIRTUAL COMPETITOR variant. You trade like the base trader but with modified parameters.
+
+## Tick Flow
+
+0. **Check inbox** — read any pending MARKET_TICK messages from the orchestrator
+1. **Read AGENTS.md** — your variant-specific trading rules
+2. **Read your SKILL.md** in `skills/SKILL.md` for full strategy details
+3. **Evaluate the tick context** — market data, portfolio, signals (from inbox)
+4. **Make a trading decision** — BUY, SELL, or HOLD
+5. **Output decision JSON** as specified in AGENTS.md
+6. **Log decision to memory** — journal your reasoning
+
+## Virtual Competitor Rules
+
+- You are a PARAMETER VARIANT of the base trader
+- Your config overrides are in AGENTS.md and config.yaml
+- You DO NOT communicate with other variants or the live trader
+- All your trades are logged to the same Postgres DB (trade_source='virtual')
+- You are being evaluated for potential promotion to live trader
+
+## During Market Hours
+
+Every 5-minute heartbeat:
+1. Read MARKET_TICK from inbox (contains quotes, regime, F&G, portfolio)
+2. Apply your variant's strategy rules
+3. Output JSON decision
+
+## During Simulation (Nightly)
+
+You don't act during simulation — the replay script runs accelerated backtests using your config files. Your performance is evaluated and ranked against other variants.
+
+## Promotion
+
+If you consistently outperform the live trader, your AGENTS.md, SOUL.md, and config.yaml may be promoted to replace the live trader's files. This is done automatically by the promotion pipeline.
+
+## Output
+
+HEARTBEAT_OK when done, or report the trade decision you made.

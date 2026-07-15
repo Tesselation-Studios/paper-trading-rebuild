@@ -181,8 +181,8 @@ class SimulationRunner:
         for name, value in (params_override or {}).items():
             try:
                 self.signal_engine.params.set(name, value)
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning("simulator: %s", e)
 
         # Run tick-by-tick simulation
         journal: List[str] = []

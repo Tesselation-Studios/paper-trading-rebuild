@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import random
 import sqlite3
 import subprocess
@@ -28,6 +29,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
+
+log = logging.getLogger("prompt_sweep")
 
 # ── Add rebuild repo to path ─────────────────────────────────────────────────
 _REBUILD_SRC = str(Path(__file__).resolve().parent.parent.parent / "paper-trading-rebuild" / "src")
@@ -444,8 +447,8 @@ def _load_dates_data(
             )
             if ticks:
                 return ticks
-        except Exception:
-            pass  # Fall through to per-date fallback
+        except Exception as e:
+            log.warning("load_date_range failed, using per-date fallback: %s", e)
 
     # Per-date fallback using load_historical_ticks
     all_ticks: List[Tick] = []
@@ -829,8 +832,8 @@ def create_winner_branch(
         # Try to return to main
         try:
             _run_git(["checkout", "main"])
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("git checkout main failed: %s", e)
         return None
 
 

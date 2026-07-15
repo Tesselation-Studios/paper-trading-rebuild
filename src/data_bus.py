@@ -978,8 +978,8 @@ def _fetch_fred_csv(series_id: str):
             parts = line.split(",")
             if len(parts) == 2 and parts[1].strip() != ".":
                 return {"date": parts[0].strip(), "value": parts[1].strip()}
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning("FRED CSV fetch failed for series %s: %s", series_id, e)
     return None
 
 
@@ -3024,8 +3024,8 @@ def _fetch_social_reddit(max_tickers: int = 3) -> dict:
                         ts = pipeline.fetch_ticker_sentiment(ticker)
                         if ts.get("posts", 0) > 0:
                             matched.add(ticker.upper())
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        log.debug("ticker sentiment fetch failed for %s: %s", ticker, e)
 
             sentiment_score = round(total_weighted_score / total_weight, 4) if total_weight > 0 else 0.0
 
@@ -5155,8 +5155,8 @@ def briefing():
                                 entry_dt = entry_dt.replace(tzinfo=et)
                             if entry_dt < cutoff_24h:
                                 continue
-                        except Exception:
-                            pass  # can't parse, include anyway
+                        except Exception as e:
+                            log.debug("congress alert timestamp parse failed: %s", e)
                     congress_alerts.append({
                         "politician": entry.get("politician", entry.get("name", "unknown")),
                         "ticker": entry.get("ticker", entry.get("symbol", "")),

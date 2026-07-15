@@ -1,3 +1,7 @@
+import logging
+
+log = logging.getLogger("train_regime_detector")
+
 """
 Train K-Means regime detector from Postgres market_data.bars_1d.
 
@@ -97,8 +101,8 @@ def main():
         try:
             result = detector.predict(features)
             labels.append(result.label)
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("train_regime_detector: %s", e)
 
     dist = Counter(labels)
     total = sum(dist.values())

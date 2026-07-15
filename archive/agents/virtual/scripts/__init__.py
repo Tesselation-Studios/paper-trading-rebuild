@@ -1,0 +1,1 @@
+"""Virtual competitor strategy skills."""

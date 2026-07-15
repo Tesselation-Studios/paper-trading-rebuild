@@ -197,8 +197,8 @@ class PromptBuilder:
                 config = json.loads(result.stdout)
                 skill_names = config.get("skills", [])
                 return [f"{name}: trading tool" for name in skill_names]
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("could not load agent files from OpenClaw host, using defaults: %s", e)
         return DEFAULTS.get(self.trader, KAIROS_DEFAULTS).skills
 
     def build_tick_prompt(

@@ -586,8 +586,8 @@ def get_param(param_name: str, agent_id: str = _DEFAULT_AGENT,
             ).fetchone()
             if row:
                 return row["param_value"]
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning("config_loader: %s", e)
 
     # Fallback: try YAML config
     try:

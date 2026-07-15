@@ -1,3 +1,7 @@
+import logging
+
+log = logging.getLogger("leaderboard_api")
+
 #!/usr/bin/env python3
 """
 Paper Trading Dashboard — Flask API + static frontend server.
@@ -272,8 +276,8 @@ def _parse_decisions(company: str) -> list:
                         "reason":   r["error_reason"],
                     },
                 })
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("leaderboard_api: %s", e)
     return events
 
 
@@ -326,10 +330,10 @@ def _get_benchmark_data() -> dict:
                             "period_start": None,
                             "period_end": None,
                         }
-                except Exception:
-                    pass
-    except Exception:
-        pass
+                except Exception as e:
+                    log.warning("leaderboard_api: %s", e)
+    except Exception as e:
+        log.warning("leaderboard_api: %s", e)
     return data
 
 
@@ -381,15 +385,15 @@ def _get_paused_status(company: str) -> Optional[dict]:
                     if evt_dt.tzinfo is None:
                         evt_dt = evt_dt.replace(tzinfo=timezone.utc)
                     is_recent = (datetime.now(timezone.utc) - evt_dt) < timedelta(hours=24)
-                except Exception:
-                    pass
+                except Exception as e:
+                    log.warning("leaderboard_api: %s", e)
                 return {
                     "paused": is_recent,
                     "reason": row["reason"],
                     "timestamp": row["timestamp"],
                 }
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning("leaderboard_api: %s", e)
     return None
 
 
@@ -464,8 +468,8 @@ def _get_trade_stats(company: str) -> dict:
                     result["wins"] = perf.get("wins", 0) or 0
                     result["losses"] = perf.get("losses", 0) or 0
                     result["win_rate"] = perf.get("win_rate", 0) or 0
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning("leaderboard_api: %s", e)
     return result
 
 def _get_last_activity(company: str) -> str | None:
@@ -519,16 +523,16 @@ def _get_profile_from_db(company: str) -> dict:
         identity = {}
         try:
             current_state = json.loads(row["current_state"]) if isinstance(row["current_state"], str) else row["current_state"] or {}
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("leaderboard_api: %s", e)
         try:
             performance = json.loads(row["performance"]) if isinstance(row["performance"], str) else row["performance"] or {}
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("leaderboard_api: %s", e)
         try:
             identity = json.loads(row["identity"]) if isinstance(row["identity"], str) else row["identity"] or {}
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("leaderboard_api: %s", e)
 
         return {
             "tagline": row["tagline"] or "",
@@ -670,8 +674,8 @@ def api_vetoes():
                         "ticker": r["ticker"],
                         "reason": r["thesis"],
                     })
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning("leaderboard_api: %s", e)
     return jsonify({"vetoes": vetoes})
 
 
@@ -694,8 +698,8 @@ def api_positions():
                 ).fetchall()
                 for r in rows:
                     positions.append(dict(r))
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning("leaderboard_api: %s", e)
     return jsonify({"positions": positions})
 
 
@@ -734,15 +738,15 @@ def api_kill_switch():
                         if evt_dt.tzinfo is None:
                             evt_dt = evt_dt.replace(tzinfo=timezone.utc)
                         is_recent = (datetime.now(timezone.utc) - evt_dt) < timedelta(hours=24)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        log.warning("leaderboard_api: %s", e)
                     status[agent_id] = {
                         "paused": is_recent,
                         "pause_reason": r["reason"],
                         "pause_timestamp": r["timestamp"],
                     }
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning("leaderboard_api: %s", e)
     return jsonify({"kill_switch": status})
 
 
@@ -807,8 +811,8 @@ def api_journal():
                     (limit,)
                 ).fetchall()
                 entries = [dict(r) for r in rows]
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning("leaderboard_api: %s", e)
 
     # Fallback: parse kairos daily log if DB trader_journal is empty
     if not entries:
@@ -837,8 +841,8 @@ def api_journal():
                 })
                 if len(entries) >= limit:
                     break
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("leaderboard_api: %s", e)
 
     return jsonify({"entries": entries[:limit]})
 
@@ -855,8 +859,8 @@ def api_signals():
         if r.status_code == 200:
             data = r.json()
             return jsonify(data)
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning("leaderboard_api: %s", e)
 
     # Fallback: ML signals from local DB
     limit = int(request.args.get("limit", 20))
@@ -872,8 +876,8 @@ def api_signals():
                     (limit,)
                 ).fetchall()
                 signals = [dict(r) for r in rows]
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning("leaderboard_api: %s", e)
 
     return jsonify({"signals": signals})
 
@@ -941,8 +945,8 @@ def api_options_proxy():
                         if "latestQuote" in snap:
                             c["latest_bid"] = snap["latestQuote"].get("bp")
                             c["latest_ask"] = snap["latestQuote"].get("ap")
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning("leaderboard_api: %s", e)
 
         return jsonify({
             "symbol": symbol,
@@ -1011,10 +1015,10 @@ def api_options_positions():
                             )
                             if r.status_code == 200:
                                 snapshots_by_symbol.update(r.json().get("snapshots", {}))
-                        except Exception:
-                            pass
-            except Exception:
-                pass  # Greeks are nice-to-have; positions still show without them
+                        except Exception as e:
+                            log.warning("leaderboard_api: %s", e)
+            except Exception as e:
+                log.debug("option Greeks fetch failed: %s", e)  # Greeks are nice-to-have
 
         for pos in option_positions:
             ticker = pos.get("ticker", pos.get("symbol", ""))
@@ -1049,8 +1053,8 @@ def api_options_positions():
                 try:
                     from datetime import date as dt_date
                     dte = (dt_date.fromisoformat(exp_date) - dt_date.today()).days
-                except Exception:
-                    pass
+                except Exception as e:
+                    log.warning("leaderboard_api: %s", e)
 
             # Extract greeks from snapshot
             greeks = {}
@@ -1106,8 +1110,8 @@ def api_watchlists():
                         (company,),
                     ).fetchall()
                     out[company] = [r["ticker"] for r in rows]
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning("leaderboard_api: %s", e)
     return jsonify(out)
 
 
@@ -1124,8 +1128,8 @@ def api_wiki():
     if WIKI_CACHE.exists():
         try:
             digest = json.loads(WIKI_CACHE.read_text())
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("leaderboard_api: %s", e)
 
     # Extract key counts from stale-pages and open-questions reports
     stale_count = 0
@@ -1378,8 +1382,8 @@ def debug_dashboard():
 <tr><th>Next NFP</th><td>{cal.get('next_nfp', '—')}</td></tr>
 <tr><th>Next Holiday</th><td>{cal.get('next_holiday', '—')}</td></tr>
 </table>'''
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning("leaderboard_api: %s", e)
 
     # ── Render ────────────────────────────────────────────────────────────
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")

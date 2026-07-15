@@ -29,32 +29,12 @@ from src.db.connection import (
 log = logging.getLogger("data_fetcher")
 
 
-# ── Alpaca Integration ────────────────────────────────────────────────────────
-
 # Default tickers for Kairos (momentum trader — technical data)
 KAIROS_TICKERS = [
     "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA",
     "SPY", "QQQ", "IWM", "DIA",
     "JPM", "V", "WMT", "JNJ", "XOM", "UNH", "MA", "HD", "PG",
 ]
-
-# Backup: Alpaca requires API keys. If not set, use yfinance as fallback.
-ALPACA_KEY = os.environ.get("ALPACA_KAIROS_KEY", "")
-ALPACA_SECRET = os.environ.get("ALPACA_ALDRIDGE_KEY", "")
-
-# Try to find any Alpaca key
-for key_env in ("ALPACA_KAIROS_KEY", "ALPACA_ALDRIDGE_KEY", "ALPACA_STONKS_KEY",
-                "APCA_API_KEY_ID", "ALPACA_API_KEY"):
-    if not ALPACA_KEY:
-        ALPACA_KEY = os.environ.get(key_env, "")
-    if not ALPACA_SECRET:
-        ALPACA_SECRET = os.environ.get(
-            key_env.replace("KEY", "SECRET").replace("_ID", "_SECRET"), ""
-        )
-    if key_env.endswith("_KEY"):
-        secret_env = key_env.replace("_KEY", "_SECRET")
-        if not ALPACA_SECRET:
-            ALPACA_SECRET = os.environ.get(secret_env, "")
 
 
 # ── yfinance fallback ─────────────────────────────────────────────────────────

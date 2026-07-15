@@ -143,8 +143,8 @@ def _ticker_sector(ticker: str) -> str:
             if row and row["sector"]:
                 _KNOWN_SECTORS[t] = row["sector"]
                 return row["sector"]
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning("reflection_cron: %s", e)
     return "Unknown"
 
 
@@ -194,8 +194,8 @@ def _get_trades(agent_id: str, limit: int = 100, since: Optional[date] = None) -
         log.warning("Failed to fetch trades for %s: %s", agent_id, e)
         try:
             conn.close()
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("reflection_cron: %s", e)
         return []
 
 
@@ -233,8 +233,8 @@ def _get_trade_signals(trade_ids: List[int]) -> Dict[int, List[dict]]:
         log.warning("Failed to fetch trade signals: %s", e)
         try:
             conn.close()
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("reflection_cron: %s", e)
         return {}
 
 
@@ -270,8 +270,8 @@ def _get_agents() -> List[str]:
         log.warning("Failed to fetch agents: %s", e)
         try:
             conn.close()
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("reflection_cron: %s", e)
         return []
 
 
@@ -719,8 +719,8 @@ def write_reflection(agent_id: str, reflection_text: str, stats: dict) -> bool:
         log.warning("Failed to write reflection for %s: %s", agent_id, e)
         try:
             conn.close()
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("reflection_cron: %s", e)
         return False
 
 
@@ -757,8 +757,8 @@ def get_last_reflection(agent_id: str) -> Optional[dict]:
         log.warning("Failed to fetch last reflection for %s: %s", agent_id, e)
         try:
             conn.close()
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("reflection_cron: %s", e)
         return None
 
 

@@ -172,8 +172,8 @@ class SocialRedditPipeline:
                         el = None
                         try:
                             el = entry.find(tag, ns) if ":" in tag else entry.find(tag)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            log.warning("social_reddit: %s", e)
                         if el is not None and el.text:
                             content = el.text
                             break

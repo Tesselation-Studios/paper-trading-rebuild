@@ -169,8 +169,8 @@ class Trader:
                 if sector_map:
                     log.info("RiskManager: loaded sectors for %d tickers", len(sector_map))
                     return lambda t: sector_map.get(t.upper())
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning("trader: %s", e)
         except ImportError:
             pass
         return None
@@ -181,8 +181,8 @@ class Trader:
         if lookup:
             try:
                 return lookup(ticker)
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning("trader: %s", e)
         return None
 
     def _build_risk_context(self) -> Dict[str, Any]:
