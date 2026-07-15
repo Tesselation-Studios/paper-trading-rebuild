@@ -66,11 +66,12 @@ def api_decisions():
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute(
-        "SELECT agent_id, ticker, action, conviction, thesis, timestamp "
+        "SELECT trader_id, ticker, decision AS action, conviction, rationale AS thesis, timestamp "
         "FROM trading.decisions "
         "WHERE timestamp > now() - interval '24 hours' "
-        "AND agent_id IN ('trader-kairos', 'trader-aldridge', 'trader-stonks') "
-        "AND action != 'HOLD' "
+        "  AND trader_id IN ('trader-kairos', 'trader-aldridge', 'trader-stonks') "
+        "  AND UPPER(decision) NOT IN ('HOLD', 'HOLD_CASH', 'HOLD_ALL', "
+        "                               'PASS', 'NO_ENTRY', 'OBSERVATION', 'OVERVIEW') "
         "ORDER BY timestamp DESC LIMIT 100")
     rows = cur.fetchall()
     conn.close()

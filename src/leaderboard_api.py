@@ -270,6 +270,8 @@ def _parse_decisions(company: str) -> list:
                    FROM trader_decisions d
                    LEFT JOIN orders o ON d.id = o.decision_id
                    WHERE d.agent_id = %s
+                     AND UPPER(d.action) NOT IN ('HOLD', 'HOLD_CASH', 'HOLD_ALL',
+                                                  'PASS', 'NO_ENTRY', 'OBSERVATION', 'OVERVIEW')
                    ORDER BY d.timestamp DESC""",
                 (f"trader-{company}",),
             ).fetchall()

@@ -16,3 +16,4 @@ pyyaml>=6.0
 python-dotenv
 asyncpg>=0.29
 psycopg2-binary>=2.9
+yahooquery>=2.0

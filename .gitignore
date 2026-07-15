@@ -11,3 +11,4 @@ logs/
 reports/
 venv/
 .tasks/orchestrator_state.json
+state/*.log

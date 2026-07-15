@@ -85,11 +85,13 @@ def resolve_tickers(spec: str) -> List[str]:
 
 # ── Lazy pandas_ta / yfinance import (may not be available on older Python) ──
 _has_pandas_ta: bool = False
+_PANDAS_TA_IMPORT_ERROR: Optional[str] = None
 try:
     import pandas_ta as ta  # noqa: E402
     _has_pandas_ta = True
-except ImportError:
+except Exception as e:
     ta = None  # type: ignore[assignment]
+    _PANDAS_TA_IMPORT_ERROR = str(e)
 
 
 def existing_dates(ticker: str) -> Set[str]:
@@ -139,6 +141,11 @@ def missing_date_range(
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """Add RSI(14), MACD(12,26,9), and ATR(14) columns to a bars DataFrame."""
     if not _has_pandas_ta:
+        if _PANDAS_TA_IMPORT_ERROR:
+            import logging
+            logging.getLogger("backfill_bars").debug(
+                "pandas_ta unavailable: %s", _PANDAS_TA_IMPORT_ERROR
+            )
         for col in ["rsi_14", "macd", "macd_signal", "macd_hist", "atr_14"]:
             df[col] = float("nan")
         return df

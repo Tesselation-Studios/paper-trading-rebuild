@@ -1,11 +1,36 @@
-# Bankroll
+# Bankroll — Stonks Capital Risk Ceiling
 
-Ceiling: $35.00
-Growth/decay rate: 1.01 / 0.99
-Closed trades this session: 0
-Wins: 0 | Losses: 0
-Net: N/A
-Used this tick: $0.00
+> **Active ceiling:** ${{ceiling}}
+> **Portfolio value:** ${{portfolio_value}}
+> **Risk multiplier:** 1.25× (Stonks runs aggressive)
 
-## History
-- No closed trades yet. Starting ceiling: $35.00.
+## Formula
+
+```
+ceiling = max($5.00, portfolio_value × 0.01 × 1.25)
+growth  = 1 + win_streak × 0.015
+decay   = 1 - loss_streak × 0.01
+```
+
+## State
+
+| Metric | Value |
+|--------|-------|
+| Ceiling | ${{ceiling}} |
+| Deployed | ${{deployed}} |
+| Remaining | ${{remaining}} |
+| Wins/Losses | {{wins}}/{{losses}} |
+
+## Positions
+
+{{#positions}}
+- {{ticker}}: ${{cost}} ({{pct}}% of ceiling)
+{{/positions}}
+
+## Session P&L
+
+- Closed: ${{closed_pnl}}
+- Running streak: {{streak}}
+
+---
+*Auto-generated. Synced from Alpaca + PG.*
