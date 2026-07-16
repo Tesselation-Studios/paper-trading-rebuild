@@ -29,6 +29,7 @@ jobs:
             --ignore=tests/test_virtual_runner.py \
             --junitxml=test-results/junit.xml \
             --json-report --json-report-file=test-results/report.json \
+            --cov=src --cov-report=term --cov-fail-under=60 \
             2>&1 | tee test-results/pytest.log
       - name: Upload test results
         if: always()
