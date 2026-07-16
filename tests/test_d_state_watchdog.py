@@ -1,6 +1,9 @@
 """Tests for D-State Watchdog — detect silent/stuck traders."""
 
+import json
+import os
 import sys
+import tempfile
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch, MagicMock, PropertyMock
 
@@ -444,16 +447,19 @@ class TestRestartStalledTraders:
         report.ok_traders = len(ok or [])
         return report
 
-    def test_no_alerts_no_restart(self):
+    def test_no_alerts_no_restart(self, tmp_path):
         """All traders healthy → no restart attempted."""
         from src.d_state_watchdog import _restart_stalled_traders
+        state_path = str(tmp_path / "crash-recovery.json")
         report = self._make_report(ok=["kairos", "aldridge", "stonks"])
-        results = _restart_stalled_traders(report)
+        with patch("src.d_state_watchdog.CRASH_STATE_PATH", state_path):
+            results = _restart_stalled_traders(report)
         assert results == {}
 
-    def test_restarts_d_state(self):
+    def test_restarts_d_state(self, tmp_path):
         """D-state trader triggers gateway restart."""
         from src.d_state_watchdog import _restart_stalled_traders
+        state_path = str(tmp_path / "crash-recovery.json")
         report = self._make_report(
             d_state=["stonks"],
             ok=["kairos", "aldridge"],
@@ -465,16 +471,18 @@ class TestRestartStalledTraders:
             mock_result.stderr = ""
             mock_run.return_value = mock_result
 
-            results = _restart_stalled_traders(report)
+            with patch("src.d_state_watchdog.CRASH_STATE_PATH", state_path):
+                results = _restart_stalled_traders(report)
 
             assert results["stonks"] == "restarted"
             assert "kairos" not in results
             assert "aldridge" not in results
             mock_run.assert_called_once()
 
-    def test_restarts_warnings_too(self):
+    def test_restarts_warnings_too(self, tmp_path):
         """Warning traders also trigger restart."""
         from src.d_state_watchdog import _restart_stalled_traders
+        state_path = str(tmp_path / "crash-recovery.json")
         report = self._make_report(
             warnings=["kairos"],
             ok=["aldridge", "stonks"],
@@ -486,14 +494,16 @@ class TestRestartStalledTraders:
             mock_result.stderr = ""
             mock_run.return_value = mock_result
 
-            results = _restart_stalled_traders(report)
+            with patch("src.d_state_watchdog.CRASH_STATE_PATH", state_path):
+                results = _restart_stalled_traders(report)
 
             assert results["kairos"] == "restarted"
             mock_run.assert_called_once()
 
-    def test_restart_failure(self):
+    def test_restart_failure(self, tmp_path):
         """SSH failure returns error per trader."""
         from src.d_state_watchdog import _restart_stalled_traders
+        state_path = str(tmp_path / "crash-recovery.json")
         report = self._make_report(
             d_state=["stonks"],
             ok=["kairos", "aldridge"],
@@ -505,37 +515,43 @@ class TestRestartStalledTraders:
             mock_result.stderr = "Connection refused"
             mock_run.return_value = mock_result
 
-            results = _restart_stalled_traders(report)
+            with patch("src.d_state_watchdog.CRASH_STATE_PATH", state_path):
+                results = _restart_stalled_traders(report)
 
             assert "failed" in results["stonks"]
             assert "Connection refused" in results["stonks"]
 
-    def test_restart_timeout(self):
+    def test_restart_timeout(self, tmp_path):
         """SSH timeout returns error."""
         from src.d_state_watchdog import _restart_stalled_traders
+        state_path = str(tmp_path / "crash-recovery.json")
         report = self._make_report(d_state=["stonks"], ok=["kairos", "aldridge"])
         with patch("src.d_state_watchdog.subprocess.run") as mock_run:
             import subprocess
             mock_run.side_effect = subprocess.TimeoutExpired(cmd="ssh", timeout=30)
 
-            results = _restart_stalled_traders(report)
+            with patch("src.d_state_watchdog.CRASH_STATE_PATH", state_path):
+                results = _restart_stalled_traders(report)
 
             assert "SSH timeout" in results["stonks"]
 
-    def test_ssh_not_found(self):
+    def test_ssh_not_found(self, tmp_path):
         """ssh binary not available."""
         from src.d_state_watchdog import _restart_stalled_traders
+        state_path = str(tmp_path / "crash-recovery.json")
         report = self._make_report(d_state=["stonks"], ok=["kairos", "aldridge"])
         with patch("src.d_state_watchdog.subprocess.run") as mock_run:
             mock_run.side_effect = FileNotFoundError("ssh")
 
-            results = _restart_stalled_traders(report)
+            with patch("src.d_state_watchdog.CRASH_STATE_PATH", state_path):
+                results = _restart_stalled_traders(report)
 
             assert "ssh not found" in results["stonks"]
 
-    def test_multiple_d_state_single_restart(self):
+    def test_multiple_d_state_single_restart(self, tmp_path):
         """Multiple D-state traders → single gateway restart, all marked restarted."""
         from src.d_state_watchdog import _restart_stalled_traders
+        state_path = str(tmp_path / "crash-recovery.json")
         report = self._make_report(
             d_state=["stonks", "kairos"],
             ok=["aldridge"],
@@ -547,7 +563,8 @@ class TestRestartStalledTraders:
             mock_result.stderr = ""
             mock_run.return_value = mock_result
 
-            results = _restart_stalled_traders(report)
+            with patch("src.d_state_watchdog.CRASH_STATE_PATH", state_path):
+                results = _restart_stalled_traders(report)
 
             assert results["stonks"] == "restarted"
             assert results["kairos"] == "restarted"
@@ -609,3 +626,390 @@ class TestRestartStalledTraders:
                 exit_code = main()
                 assert exit_code == 0
                 mock_restart.assert_not_called()
+
+
+# ── Crash Counter ──────────────────────────────────────────────────────────
+
+
+class TestCrashRecovery:
+    """Tests for CrashRecovery — crash counter and pause threshold."""
+
+    @pytest.fixture
+    def temp_state(self, tmp_path):
+        """Create a temporary crash state file path."""
+        return str(tmp_path / "crash-recovery.json")
+
+    def test_new_trader_starts_clean(self, temp_state):
+        """A new trader has 0 crashes and is not paused."""
+        from src.d_state_watchdog import CrashRecovery
+        cr = CrashRecovery(state_path=temp_state)
+        status = cr.get_status("kairos")
+        assert status["crash_count"] == 0
+        assert status["is_paused"] is False
+        assert status["first_crash"] is None
+        assert status["last_crash"] is None
+
+    def test_record_crash_increments(self, temp_state):
+        """record_crash increments the counter."""
+        from src.d_state_watchdog import CrashRecovery
+        cr = CrashRecovery(state_path=temp_state)
+
+        cr.record_crash("kairos")
+        assert cr.get_status("kairos")["crash_count"] == 1
+
+        cr.record_crash("kairos")
+        assert cr.get_status("kairos")["crash_count"] == 2
+
+    def test_record_crash_sets_timestamps(self, temp_state):
+        """record_crash sets first_crash and last_crash."""
+        from src.d_state_watchdog import CrashRecovery
+        cr = CrashRecovery(state_path=temp_state)
+
+        cr.record_crash("kairos")
+        status = cr.get_status("kairos")
+        assert status["first_crash"] is not None
+        assert status["last_crash"] is not None
+        assert status["first_crash"] == status["last_crash"]  # same for first crash
+
+    def test_pause_at_limit(self, temp_state):
+        """Trader pauses when crash count reaches CRASH_LIMIT."""
+        from src.d_state_watchdog import CrashRecovery, CRASH_LIMIT
+        cr = CrashRecovery(state_path=temp_state)
+
+        # Record crashes up to limit
+        for i in range(CRASH_LIMIT - 1):
+            cr.record_crash("kairos")
+            assert cr.is_paused("kairos") is False
+
+        # This one should hit the limit
+        cr.record_crash("kairos")
+        assert cr.is_paused("kairos") is True
+        status = cr.get_status("kairos")
+        assert status["crash_count"] == CRASH_LIMIT
+        assert status["paused_at"] is not None
+
+    def test_paused_trader_not_restarted(self, temp_state):
+        """A paused trader is skipped during restart."""
+        from src.d_state_watchdog import CrashRecovery, _restart_stalled_traders
+
+        # Pre-set paused state
+        with open(temp_state, "w") as f:
+            json.dump({
+                "kairos": {
+                    "crash_count": 5,
+                    "first_crash": datetime.now(timezone.utc).isoformat(),
+                    "last_crash": datetime.now(timezone.utc).isoformat(),
+                    "last_restart": None,
+                    "is_paused": True,
+                    "paused_at": datetime.now(timezone.utc).isoformat(),
+                }
+            }, f)
+
+        from src.d_state_watchdog import CrashRecovery
+
+        now = datetime.now(timezone.utc)
+        report = WatchdogReport(timestamp=now)
+        report.traders = [
+            TraderStatus(trader_id="kairos", is_active=True,
+                         severity="critical", is_d_state=True),
+            TraderStatus(trader_id="aldridge", is_active=True,
+                         last_heartbeat=now, severity="ok"),
+        ]
+        report.checked_traders = 2
+        report.d_state_traders = 1
+        report.ok_traders = 1
+
+        # Patch the CrashRecovery to use our temp file
+        with patch("src.d_state_watchdog.CRASH_STATE_PATH", temp_state):
+            results = _restart_stalled_traders(report)
+
+        assert results["kairos"] == "paused"
+        assert "aldridge" not in results
+
+    def test_unpause_resets_counter(self, temp_state):
+        """Unpausing resets crash count to 0."""
+        from src.d_state_watchdog import CrashRecovery
+        cr = CrashRecovery(state_path=temp_state)
+
+        # Crash to limit
+        for _ in range(5):
+            cr.record_crash("kairos")
+        assert cr.is_paused("kairos") is True
+
+        # Unpause
+        was_paused = cr.unpause("kairos")
+        assert was_paused is True
+        assert cr.is_paused("kairos") is False
+        status = cr.get_status("kairos")
+        assert status["crash_count"] == 0
+        assert status["first_crash"] is None
+
+    def test_unpause_not_paused(self, temp_state):
+        """Unpausing a never-paused trader returns False."""
+        from src.d_state_watchdog import CrashRecovery
+        cr = CrashRecovery(state_path=temp_state)
+        was_paused = cr.unpause("kairos")
+        assert was_paused is False
+
+    def test_record_restart(self, temp_state):
+        """record_restart sets last_restart timestamp."""
+        from src.d_state_watchdog import CrashRecovery
+        cr = CrashRecovery(state_path=temp_state)
+
+        cr.record_crash("kairos")
+        cr.record_restart("kairos")
+        status = cr.get_status("kairos")
+        assert status["last_restart"] is not None
+        assert status["crash_count"] == 1  # doesn't reset crash count
+
+    def test_window_reset(self, temp_state):
+        """Crash counter resets when CRASH_WINDOW expires."""
+        from src.d_state_watchdog import CrashRecovery, CRASH_WINDOW_SECONDS
+        cr = CrashRecovery(state_path=temp_state)
+
+        # Simulate a crash from long ago
+        from datetime import timedelta
+        old_time = (datetime.now(timezone.utc) - timedelta(seconds=CRASH_WINDOW_SECONDS + 60)).isoformat()
+        cr._state["kairos"] = {
+            "crash_count": 3,
+            "first_crash": old_time,
+            "last_crash": old_time,
+            "last_restart": None,
+            "is_paused": False,
+            "paused_at": None,
+        }
+        cr._save()
+
+        # Next crash should reset the window first
+        cr.record_crash("kairos")
+        status = cr.get_status("kairos")
+        # Counter should be 1 (reset + new crash), not 4
+        assert status["crash_count"] == 1
+
+    def test_get_all(self, temp_state):
+        """get_all returns all traders."""
+        from src.d_state_watchdog import CrashRecovery
+        cr = CrashRecovery(state_path=temp_state)
+        cr.record_crash("kairos")
+        cr.record_crash("aldridge")
+
+        all_status = cr.get_all()
+        assert "kairos" in all_status
+        assert "aldridge" in all_status
+        assert all_status["kairos"]["crash_count"] == 1
+        assert all_status["aldridge"]["crash_count"] == 1
+
+    def test_persistence(self, temp_state):
+        """Crash state persists to disk and survives re-read."""
+        from src.d_state_watchdog import CrashRecovery
+        cr1 = CrashRecovery(state_path=temp_state)
+        cr1.record_crash("kairos")
+        cr1.record_crash("kairos")
+
+        # New instance reads from same file
+        cr2 = CrashRecovery(state_path=temp_state)
+        status = cr2.get_status("kairos")
+        assert status["crash_count"] == 2
+
+    def test_enrich_report_with_crash_state(self):
+        """main() enriches report with crash state from file."""
+        from src.d_state_watchdog import main
+        import tempfile
+        import os
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump({
+                "kairos": {
+                    "crash_count": 3,
+                    "first_crash": datetime.now(timezone.utc).isoformat(),
+                    "last_crash": datetime.now(timezone.utc).isoformat(),
+                    "last_restart": datetime.now(timezone.utc).isoformat(),
+                    "is_paused": False,
+                    "paused_at": None,
+                }
+            }, f)
+            temp_path = f.name
+
+        try:
+            with patch("src.d_state_watchdog.check_all_traders") as mock_check:
+                now = datetime.now(timezone.utc)
+                mock_report = WatchdogReport(timestamp=now)
+                mock_report.ok_traders = 3
+                mock_report.checked_traders = 3
+                mock_report.traders = [
+                    TraderStatus(trader_id="kairos", is_active=True,
+                                 last_heartbeat=now, severity="ok"),
+                    TraderStatus(trader_id="aldridge", is_active=True,
+                                 last_heartbeat=now, severity="ok"),
+                    TraderStatus(trader_id="stonks", is_active=True,
+                                 last_heartbeat=now, severity="ok"),
+                ]
+                mock_check.return_value = mock_report
+
+                with patch.object(sys, "argv", [
+                    "d_state_watchdog.py", "--quiet",
+                    "--crash-state", temp_path
+                ]):
+                    exit_code = main()
+                    assert exit_code == 0
+                    # kairos should have crash_count=3 from file
+                    kairos = [t for t in mock_report.traders if t.trader_id == "kairos"][0]
+                    assert kairos.crash_count == 3
+        finally:
+            os.unlink(temp_path)
+
+    def test_main_unpause(self):
+        """main() with --unpause unpauses a trader."""
+        from src.d_state_watchdog import main
+        import tempfile
+        import os
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump({
+                "kairos": {
+                    "crash_count": 5,
+                    "first_crash": datetime.now(timezone.utc).isoformat(),
+                    "last_crash": datetime.now(timezone.utc).isoformat(),
+                    "last_restart": None,
+                    "is_paused": True,
+                    "paused_at": datetime.now(timezone.utc).isoformat(),
+                }
+            }, f)
+            temp_path = f.name
+
+        try:
+            with patch.object(sys, "argv", [
+                "d_state_watchdog.py", "--unpause", "kairos",
+                "--crash-state", temp_path
+            ]):
+                exit_code = main()
+                assert exit_code == 0
+
+            # Verify unpaused
+            from src.d_state_watchdog import CrashRecovery
+            cr = CrashRecovery(state_path=temp_path)
+            assert cr.is_paused("kairos") is False
+            assert cr.get_status("kairos")["crash_count"] == 0
+        finally:
+            os.unlink(temp_path)
+
+    def test_main_unpause_all(self):
+        """main() with --unpause (no arg) unpauses all traders."""
+        from src.d_state_watchdog import main
+        import tempfile
+        import os
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump({
+                "kairos": {
+                    "crash_count": 5,
+                    "first_crash": datetime.now(timezone.utc).isoformat(),
+                    "last_crash": datetime.now(timezone.utc).isoformat(),
+                    "last_restart": None,
+                    "is_paused": True,
+                    "paused_at": datetime.now(timezone.utc).isoformat(),
+                },
+                "aldridge": {
+                    "crash_count": 5,
+                    "first_crash": datetime.now(timezone.utc).isoformat(),
+                    "last_crash": datetime.now(timezone.utc).isoformat(),
+                    "last_restart": None,
+                    "is_paused": True,
+                    "paused_at": datetime.now(timezone.utc).isoformat(),
+                }
+            }, f)
+            temp_path = f.name
+
+        try:
+            with patch.object(sys, "argv", [
+                "d_state_watchdog.py", "--unpause",
+                "--crash-state", temp_path
+            ]):
+                exit_code = main()
+                assert exit_code == 0
+
+            # Verify both unpaused
+            from src.d_state_watchdog import CrashRecovery
+            cr = CrashRecovery(state_path=temp_path)
+            assert cr.is_paused("kairos") is False
+            assert cr.is_paused("aldridge") is False
+        finally:
+            os.unlink(temp_path)
+
+    def test_restart_hits_limit_then_pauses(self):
+        """After CRASH_LIMIT restarts, trader is paused and no further restarts happen."""
+        from src.d_state_watchdog import _restart_stalled_traders, CRASH_LIMIT
+        import tempfile
+        import os
+
+        # Create temp state file
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            # Pre-crash to just below limit
+            crash_data = {
+                "kairos": {
+                    "crash_count": CRASH_LIMIT - 1,
+                    "first_crash": datetime.now(timezone.utc).isoformat(),
+                    "last_crash": datetime.now(timezone.utc).isoformat(),
+                    "last_restart": None,
+                    "is_paused": False,
+                    "paused_at": None,
+                }
+            }
+            json.dump(crash_data, f)
+            temp_path = f.name
+
+        try:
+            now = datetime.now(timezone.utc)
+            report = WatchdogReport(timestamp=now)
+            report.traders = [
+                TraderStatus(trader_id="kairos", is_active=True,
+                             severity="critical", is_d_state=True),
+            ]
+            report.checked_traders = 1
+            report.d_state_traders = 1
+
+            with patch("src.d_state_watchdog.CRASH_STATE_PATH", temp_path):
+                results = _restart_stalled_traders(report)
+
+            # Should be paused because record_crash pushed it to limit
+            assert results["kairos"] == "paused"
+
+            # Verify state file
+            from src.d_state_watchdog import CrashRecovery
+            cr = CrashRecovery(state_path=temp_path)
+            status = cr.get_status("kairos")
+            assert status["crash_count"] == CRASH_LIMIT
+            assert status["is_paused"] is True
+        finally:
+            os.unlink(temp_path)
+
+
+# ── TraderStatus crash fields ─────────────────────────────────────────────
+
+
+class TestTraderStatusCrashFields:
+    """TraderStatus includes crash recovery fields."""
+
+    def test_default_crash_fields(self):
+        """Default values for new crash fields."""
+        ts = TraderStatus(trader_id="kairos")
+        assert ts.crash_count == 0
+        assert ts.last_restart is None
+        assert ts.is_paused is False
+        assert ts.paused_at is None
+
+    def test_to_dict_includes_crash_fields(self):
+        """to_dict includes crash recovery data."""
+        now = datetime.now(timezone.utc)
+        ts = TraderStatus(
+            trader_id="kairos",
+            crash_count=3,
+            last_restart=now,
+            is_paused=True,
+            paused_at=now,
+        )
+        d = ts.to_dict()
+        assert d["crash_count"] == 3
+        assert d["last_restart"] is not None
+        assert d["is_paused"] is True
+        assert d["paused_at"] is not None
