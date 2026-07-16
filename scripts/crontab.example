@@ -1,0 +1,31 @@
+# Cron definitions for pre-assembled trading ticks
+#
+# Architecture (per SPEC):
+#   Cron fires → tick_prompt.py pre-assembles context → Agent receives
+#   fully-loaded prompt → First thought is about trading → Outputs JSON
+#   → Tick done. Session discarded.
+#
+# Prompt templates (prompts/{trader}.txt) are LOCKED during market hours
+# (9:30-4:00 ET). They can be edited during nightly sweeps only.
+#
+# Schedule:
+#   Kairos:  every 5 min, flash model, low thinking
+#   Stonks:  every 15 min, flash model, low thinking
+#   Aldridge: every 30 min, pro model, medium thinking
+#
+# Market hours: 9:30-16:00 ET, Mon-Fri
+
+# Enable the pre-tick lock (prevents template edits during market hours)
+*/1 * * * * root /usr/local/bin/tick-prompt-lock --check
+
+# === Kairos Capital — 5 min momentum trader ===
+*/5 9-15 * * 1-5 /usr/local/bin/tick-runner kairos \
+  "$(python3 /opt/paper-trading-teams/scripts/tick_prompt.py --trader kairos)"
+
+# === Stonks Capital — 15 min social/sentiment trader ===
+*/15 9-15 * * 1-5 /usr/local/bin/tick-runner stonks \
+  "$(python3 /opt/paper-trading-teams/scripts/tick_prompt.py --trader stonks)"
+
+# === Aldridge Capital — 30 min value trader ===
+*/30 9-15 * * 1-5 /usr/local/bin/tick-runner aldridge \
+  "$(python3 /opt/paper-trading-teams/scripts/tick_prompt.py --trader aldridge)"
