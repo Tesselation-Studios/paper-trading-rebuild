@@ -288,3 +288,92 @@ class TestTierTransitions:
             assert gate.min_sortino >= -10
             assert gate.min_calmar >= -10
             assert isinstance(gate.soft_gate, bool)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Cross-Trader Learning (Seed Descendants) — #203
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestExtractSeedParams:
+    def test_empty_config(self):
+        from scripts.promotion_check import _extract_seed_params
+        assert _extract_seed_params({}) == {}
+
+    def test_scalar_params_extracted(self):
+        from scripts.promotion_check import _extract_seed_params
+        config = {
+            "stop_loss": 0.05,
+            "take_profit": 0.10,
+            "max_positions": 5,
+            "temperature": 0.3,
+        }
+        result = _extract_seed_params(config)
+        assert result == config
+
+    def test_meta_keys_excluded(self):
+        from scripts.promotion_check import _extract_seed_params
+        config = {
+            "stop_loss": 0.05,
+            "parent": "kairos-exp-1",
+            "generation": 2,
+            "parent_tier": "expert",
+            "descendant_of": "kairos-exp-1",
+        }
+        result = _extract_seed_params(config)
+        assert "stop_loss" in result
+        assert "parent" not in result
+        assert "generation" not in result
+        assert "parent_tier" not in result
+        assert "descendant_of" not in result
+
+    def test_nested_dicts_excluded(self):
+        from scripts.promotion_check import _extract_seed_params
+        config = {
+            "stop_loss": 0.05,
+            "nested": {"key": "value"},
+            "complex": [{"a": 1}],
+        }
+        result = _extract_seed_params(config)
+        assert "stop_loss" in result
+        assert "nested" not in result
+        assert "complex" not in result  # list of dicts excluded
+
+    def test_simple_lists_preserved(self):
+        from scripts.promotion_check import _extract_seed_params
+        config = {
+            "symbols": ["AAPL", "GOOGL", "MSFT"],
+            "weights": [0.3, 0.3, 0.4],
+        }
+        result = _extract_seed_params(config)
+        assert result["symbols"] == ["AAPL", "GOOGL", "MSFT"]
+        assert result["weights"] == [0.3, 0.3, 0.4]
+
+    def test_none_config(self):
+        from scripts.promotion_check import _extract_seed_params
+        assert _extract_seed_params(None) == {}
+
+
+class TestSeedDescendants:
+    def test_no_seeding_below_expert(self):
+        """Only Expert and Elite promotions trigger cross-trader seeding."""
+        from scripts.promotion_check import seed_descendants, VirtualTrader
+        trader = VirtualTrader(
+            id=1, name="kairos-vee-1", base_trader="kairos",
+            variant_type="param", config={}, status="active",
+            tier="veteran", composite_score=None,
+            created_at=date(2026, 7, 1), promoted_at=None,
+        )
+        # Rookie and Veteran promotions should not seed
+        assert seed_descendants(None, trader, "rookie") == 0
+        assert seed_descendants(None, trader, "veteran") == 0
+
+    def test_no_seedable_params_skips(self):
+        from scripts.promotion_check import seed_descendants, VirtualTrader
+        trader = VirtualTrader(
+            id=1, name="kairos-exp-1", base_trader="kairos",
+            variant_type="param", config={}, status="active",
+            tier="expert", composite_score=0.85,
+            created_at=date(2026, 7, 1), promoted_at=None,
+        )
+        assert seed_descendants(None, trader, "expert") == 0
