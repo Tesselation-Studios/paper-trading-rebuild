@@ -27,6 +27,7 @@ import argparse
 import json
 import logging
 import os
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -395,6 +396,65 @@ def check_all_traders(
     return report
 
 
+def _restart_stalled_traders(
+    report: WatchdogReport,
+    gateway_host: str = "192.168.1.41",
+    gateway_user: str = "raf",
+) -> Dict[str, str]:
+    """Attempt to restart stalled/crashed traders by restarting the OpenClaw gateway.
+
+    SSHs to the gateway host and runs 'openclaw gateway restart'.
+    This restarts all cron jobs including the stalled trader.
+
+    Returns dict of trader_id -> result ("restarted", "failed: <reason>", or "skipped").
+    """
+    results: Dict[str, str] = {}
+    d_state_ids = [t.trader_id for t in report.traders if t.is_d_state]
+    warning_ids = [t.trader_id for t in report.traders if t.severity == "warning"]
+
+    restart_ids = d_state_ids + warning_ids
+    if not restart_ids:
+        return results
+
+    log.info(
+        "Auto-restart triggered for: %s (d-state: %s, warning: %s)",
+        restart_ids, d_state_ids, warning_ids,
+    )
+
+    # Single gateway restart covers all traders
+    cmd = [
+        "ssh", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=accept-new",
+        f"{gateway_user}@{gateway_host}",
+        "openclaw gateway restart",
+    ]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode == 0:
+            for tid in restart_ids:
+                results[tid] = "restarted"
+            log.info("Gateway restart succeeded for %d traders", len(restart_ids))
+        else:
+            err = result.stderr.strip() or "exit code {}".format(result.returncode)
+            for tid in restart_ids:
+                results[tid] = f"failed: {err[:120]}"
+            log.error("Gateway restart failed: %s", err)
+    except subprocess.TimeoutExpired:
+        for tid in restart_ids:
+            results[tid] = "failed: SSH timeout"
+        log.error("Gateway restart timed out")
+    except FileNotFoundError:
+        for tid in restart_ids:
+            results[tid] = "failed: ssh not found"
+        log.error("ssh command not found")
+    except Exception as e:
+        for tid in restart_ids:
+            results[tid] = f"failed: {e}"
+        log.error("Gateway restart error: %s", e)
+
+    return results
+
+
 def _format_report(report: WatchdogReport) -> str:
     """Format a watchdog report for human consumption."""
     lines = []
@@ -480,6 +540,21 @@ def main() -> int:
         action="store_true",
         help="Suppress output unless there's an alert",
     )
+    parser.add_argument(
+        "--restart", "-r",
+        action="store_true",
+        help="Auto-restart stalled/crashed traders via gateway restart",
+    )
+    parser.add_argument(
+        "--gateway-host",
+        default="192.168.1.41",
+        help="OpenClaw gateway host for restart (default: 192.168.1.41)",
+    )
+    parser.add_argument(
+        "--gateway-user",
+        default="raf",
+        help="SSH user for gateway host (default: raf)",
+    )
     args = parser.parse_args()
 
     # Determine which traders to check
@@ -498,11 +573,28 @@ def main() -> int:
             print(f"ERROR: Watchdog failed: {e}")
         return 2
 
+    # Auto-restart if requested
+    restart_results = {}
+    if args.restart and report.has_alerts:
+        restart_results = _restart_stalled_traders(
+            report,
+            gateway_host=args.gateway_host,
+            gateway_user=args.gateway_user,
+        )
+
     # Output
     if args.json:
-        print(json.dumps(report.to_dict(), indent=2, default=str))
+        output = report.to_dict()
+        if restart_results:
+            output["restart_results"] = restart_results
+        print(json.dumps(output, indent=2, default=str))
     elif not args.quiet or report.has_alerts:
         print(_format_report(report))
+        if restart_results:
+            print("\n  🔄 Restart results:")
+            for tid, result in restart_results.items():
+                icon = "✅" if result == "restarted" else "❌"
+                print(f"     {icon} {tid}: {result}")
 
     # Exit code: 0 = all ok, 1 = D-state alert, 2 = error
     if report.errors and not report.traders:

@@ -622,3 +622,120 @@ class TestApiEndpoints:
             hb = json.loads((state_dir / "heartbeat-state.json").read_text())
             assert hb["equity_kairos"] == 10500.50
             assert hb["cash_kairos"] == 8000.0
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  _compute_agent_status
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestComputeAgentStatus:
+    """Tests for _compute_agent_status — maps heartbeat age to status."""
+
+    def test_ticking_recent_heartbeat(self):
+        """Kairos (5-min ticks): heartbeat 3 min ago → ticking."""
+        ts = (datetime.now() - timedelta(minutes=3)).isoformat()
+        assert lb._compute_agent_status("kairos", ts) == "ticking"
+
+    def test_ticking_at_boundary(self):
+        """Kairos: heartbeat at exactly 2× tick interval (10 min) → ticking."""
+        ts = (datetime.now() - timedelta(minutes=10)).isoformat()
+        assert lb._compute_agent_status("kairos", ts) == "ticking"
+
+    def test_stalled_beyond_2x(self):
+        """Kairos: heartbeat 12 min ago → stalled (>10 min, <=25 min)."""
+        ts = (datetime.now() - timedelta(minutes=12)).isoformat()
+        assert lb._compute_agent_status("kairos", ts) == "stalled"
+
+    def test_stalled_at_5x_boundary(self):
+        """Kairos: heartbeat at exactly 5× tick interval (25 min) → stalled."""
+        ts = (datetime.now() - timedelta(minutes=25)).isoformat()
+        assert lb._compute_agent_status("kairos", ts) == "stalled"
+
+    def test_crashed_beyond_5x(self):
+        """Kairos: heartbeat 30 min ago → crashed (>25 min)."""
+        ts = (datetime.now() - timedelta(minutes=30)).isoformat()
+        assert lb._compute_agent_status("kairos", ts) == "crashed"
+
+    def test_crashed_no_heartbeat(self):
+        """No heartbeat → crashed."""
+        assert lb._compute_agent_status("kairos", None) == "crashed"
+
+    def test_aldridge_30min_ticks(self):
+        """Aldridge (30-min ticks): 50 min ago → ticking (<=60 min)."""
+        ts = (datetime.now() - timedelta(minutes=50)).isoformat()
+        assert lb._compute_agent_status("aldridge", ts) == "ticking"
+
+    def test_aldridge_stalled(self):
+        """Aldridge: 80 min ago → stalled (>60 min, <=150 min)."""
+        ts = (datetime.now() - timedelta(minutes=80)).isoformat()
+        assert lb._compute_agent_status("aldridge", ts) == "stalled"
+
+    def test_aldridge_crashed(self):
+        """Aldridge: 3 hours ago → crashed (>150 min)."""
+        ts = (datetime.now() - timedelta(hours=3)).isoformat()
+        assert lb._compute_agent_status("aldridge", ts) == "crashed"
+
+    def test_stonks_15min_ticks(self):
+        """Stonks (15-min ticks): 20 min ago → ticking (<=30 min)."""
+        ts = (datetime.now() - timedelta(minutes=20)).isoformat()
+        assert lb._compute_agent_status("stonks", ts) == "ticking"
+
+    def test_stonks_stalled(self):
+        """Stonks: 40 min ago → stalled (>30 min, <=75 min)."""
+        ts = (datetime.now() - timedelta(minutes=40)).isoformat()
+        assert lb._compute_agent_status("stonks", ts) == "stalled"
+
+    def test_stonks_crashed(self):
+        """Stonks: 90 min ago → crashed (>75 min)."""
+        ts = (datetime.now() - timedelta(minutes=90)).isoformat()
+        assert lb._compute_agent_status("stonks", ts) == "crashed"
+
+    def test_unknown_trader(self):
+        """Unknown trader → unknown status."""
+        ts = (datetime.now()).isoformat()
+        assert lb._compute_agent_status("unknown", ts) == "unknown"
+
+    def test_malformed_timestamp(self):
+        """Malformed timestamp falls back to crashed."""
+        assert lb._compute_agent_status("kairos", "not-a-timestamp") == "crashed"
+
+    def test_traders_endpoint_includes_agent_status(self, monkeypatch):
+        """api_traders() response includes agent_status field for each trader."""
+        state_dir = Path("/tmp/test_leaderboard_state")
+        state_dir.mkdir(exist_ok=True)
+        now = datetime.now()
+        (state_dir / "heartbeat-state.json").write_text(
+            json.dumps({
+                "last_kairos": now.isoformat(),
+                "last_aldridge": (now - timedelta(hours=3)).isoformat(),
+                "last_stonks": (now - timedelta(minutes=40)).isoformat(),
+            })
+        )
+        monkeypatch.setattr(lb, "STATE", state_dir)
+
+        # Mock DB calls that api_traders() makes
+        with patch.object(lb, "_get_profile_from_db", return_value={}), \
+             patch.object(lb, "_get_alpaca_portfolio", return_value=None), \
+             patch.object(lb, "_get_last_activity", return_value=None), \
+             patch.object(lb, "_get_trade_stats", return_value={"wins": 0, "losses": 0, "total_trades": 0, "win_rate": 0}), \
+             patch.object(lb, "_get_recent_thought", return_value=None), \
+             patch.object(lb, "_get_agent_score", return_value=0), \
+             patch.object(lb, "_get_paused_status", return_value=None), \
+             patch.object(lb, "_get_agent_benchmark", return_value=None), \
+             patch.object(lb, "_get_benchmark_data", return_value={"spy_daily": 0, "qqq_daily": 0}):
+
+            with lb.app.test_client() as c:
+                r = c.get("/api/traders")
+                assert r.status_code == 200
+                data = r.get_json()
+                traders = data.get("traders", [])
+                assert len(traders) == 3
+
+                statuses = {t["id"]: t.get("agent_status") for t in traders}
+                assert statuses["kairos"] == "ticking"
+                assert statuses["aldridge"] == "crashed"
+                assert statuses["stonks"] == "stalled"
+
+                # Shut down state dir
+                import shutil
+                shutil.rmtree(state_dir)
