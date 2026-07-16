@@ -216,9 +216,11 @@ gh issue create --repo Tesselation-Studios/paper-trading-rebuild --title "..." -
 | **Aldridge** | — | 50% | **75%** | 🔴 Should be knocked out |
 | **Stonks** | $0 | 0% | 13.2% | 🔴 Not trading at all |
 
-### ⚠️ Active Risk: Prompt Bloat
-
-Nightly synthesis is appended into AGENTS.md (~80 lines/night). Current files are ~10K chars — approaching OpenClaw's 12K hard limit. Mid-file instructions will silently be truncated. Synthesis MUST be moved to a separate file or DB.
+|### ⚠️ Active Risk: Prompt Bloat
+|
+|Nightly synthesis is appended into AGENTS.md (~80 lines/night). Current files are ~10K chars — approaching OpenClaw's 12K hard limit. Mid-file instructions will silently be truncated. Synthesis MUST be moved to a separate file or DB.
+|
+|**Fix applied (#175):** `scripts/separate_synthesis_output.py` is a guard script that runs pre-synthesis to check all AGENTS.md files for embedded synthesis output, extract it to `reports/`, and report file sizes. Run it before any nightly synthesis job. Use `--guard` flag in CI/cron to fail-fast if any file exceeds 10K chars.
 
 ### Action Items from Fusion Router
 
