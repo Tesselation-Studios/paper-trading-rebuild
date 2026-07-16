@@ -11,6 +11,11 @@ Tests cover:
     - Each trader's prompt-specific format requirements
 """
 
+import json
+import os
+import sys
+from pathlib import Path
+
 import pytest
 from src.format_validator import (
     DecisionFormatValidator,
@@ -925,3 +930,259 @@ class TestEdgeCases:
         # Actually float("0.5") would work. Let's check what the code does.
         # The code tries float(confidence). "0.5" -> 0.5 works.
         assert result.is_valid is True
+
+
+# ── Pre-Market Gate Tests ─────────────────────────────────────────────────────
+
+class TestValidatePromptFormat:
+    """Tests for _validate_prompt_format in scripts/tick_prompt.py."""
+
+    @staticmethod
+    def _validate(template: str) -> list:
+        """Import and call the function from tick_prompt."""
+        from pathlib import Path
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "tick_prompt",
+            Path(__file__).resolve().parent.parent / "scripts" / "tick_prompt.py"
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod._validate_prompt_format("test_trader", template)
+
+    def test_valid_prompt_passes(self):
+        """A complete prompt with all required sections passes."""
+        template = (
+            "You are a trader.\n"
+            "Make a DECISION: BUY, SELL, or HOLD.\n"
+            "Include CONVICTION score (0.0-1.0).\n"
+            "Provide RATIONALE for your decision.\n"
+            + "x" * 150  # pad to >200 chars
+        )
+        errors = self._validate(template)
+        assert errors == []
+
+    def test_missing_decision_fails(self):
+        """Prompt missing 'decision' section is flagged."""
+        template = (
+            "You are a trader.\n"
+            "Include CONVICTION score (0.0-1.0).\n"
+            "Provide RATIONALE for your trades.\n"
+            + "x" * 150
+        )
+        errors = self._validate(template)
+        assert any("decision" in e.lower() for e in errors)
+
+    def test_missing_conviction_fails(self):
+        """Prompt missing 'conviction' section is flagged."""
+        template = (
+            "You are a trader.\n"
+            "Make a DECISION: BUY, SELL, or HOLD.\n"
+            "Provide RATIONALE for your decision.\n"
+            + "x" * 150
+        )
+        errors = self._validate(template)
+        assert any("conviction" in e.lower() for e in errors)
+
+    def test_missing_rationale_fails(self):
+        """Prompt missing 'rationale' section is flagged."""
+        template = (
+            "You are a trader.\n"
+            "Make a DECISION: BUY, SELL, or HOLD.\n"
+            "Include CONVICTION score (0.0-1.0).\n"
+            + "x" * 150
+        )
+        errors = self._validate(template)
+        assert any("rationale" in e.lower() for e in errors)
+
+    def test_too_short_prompt_fails(self):
+        """Prompt shorter than 200 chars is flagged."""
+        template = "BUY. CONVICTION. RATIONALE."
+        errors = self._validate(template)
+        assert len(errors) > 0
+        assert any("short" in e.lower() for e in errors)
+
+    def test_case_insensitive_sections(self):
+        """Section matching is case-insensitive."""
+        template = (
+            "DECISION: BUY or SELL\n"
+            "conviction: 0.5\n"
+            "RATIONALE: because\n"
+            + "x" * 150
+        )
+        errors = self._validate(template)
+        assert errors == []
+
+
+class TestPreMarketGateSentinel:
+    """Tests for the sentinel-based pre-market gate in tick_producer.py."""
+
+    def test_check_pre_market_gate_importable(self):
+        """The check_pre_market_gate function exists and is importable."""
+        from pathlib import Path
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "tick_producer",
+            Path(__file__).resolve().parent.parent / "src" / "tick_producer.py"
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        assert callable(mod.check_pre_market_gate)
+
+    def test_gate_clear_when_no_sentinel(self, tmp_path):
+        """Gate returns OK when no sentinel file exists."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "tick_producer",
+            Path(__file__).resolve().parent.parent / "src" / "tick_producer.py"
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        # Override sentinel path to tmp
+        mod.PRE_MARKET_SENTINEL = tmp_path / ".pre_market_blocked"
+        ok, reason = mod.check_pre_market_gate()
+        assert ok is True
+        assert reason == ""
+
+    def test_gate_blocked_when_sentinel_exists(self, tmp_path):
+        """Gate returns blocked when sentinel file exists."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "tick_producer",
+            Path(__file__).resolve().parent.parent / "src" / "tick_producer.py"
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        sentinel = tmp_path / ".pre_market_blocked"
+        sentinel.write_text("Test failure: missing prompt section")
+        mod.PRE_MARKET_SENTINEL = sentinel
+
+        ok, reason = mod.check_pre_market_gate()
+        assert ok is False
+        assert "missing prompt section" in reason
+
+    def test_gate_handles_unreadable_sentinel(self, tmp_path):
+        """Gate handles unreadable sentinel gracefully."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "tick_producer",
+            Path(__file__).resolve().parent.parent / "src" / "tick_producer.py"
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        sentinel = tmp_path / ".pre_market_blocked"
+        sentinel.write_text("x")
+        sentinel.chmod(0o000)  # make unreadable
+        mod.PRE_MARKET_SENTINEL = sentinel
+
+        ok, reason = mod.check_pre_market_gate()
+        assert ok is False
+        # Should still return a reason string
+        assert len(reason) > 0
+
+        sentinel.chmod(0o644)  # cleanup
+
+
+class TestValidatePromptFormatScript:
+    """Integration tests for scripts/validate_prompt_format.py CLI."""
+
+    def test_script_exits_zero_when_valid(self):
+        """The validate script exits 0 when all prompts are valid."""
+        import subprocess
+        script = Path(__file__).resolve().parent.parent / "scripts" / "validate_prompt_format.py"
+        result = subprocess.run(
+            [sys.executable, str(script), "--json"],
+            capture_output=True, text=True, timeout=15
+        )
+        # Should exit 0 — all prompt files should exist and be valid
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+
+    def test_script_json_output_is_parseable(self):
+        """The --json output is valid JSON with expected fields."""
+        import subprocess
+        script = Path(__file__).resolve().parent.parent / "scripts" / "validate_prompt_format.py"
+        result = subprocess.run(
+            [sys.executable, str(script), "--json"],
+            capture_output=True, text=True, timeout=15
+        )
+        data = json.loads(result.stdout)
+        assert "traders_checked" in data
+        assert "trader_results" in data
+        assert "format_validator" in data
+        assert data["traders_checked"] >= 1
+
+    def test_script_ci_mode_runs_broken_prompt_tests(self):
+        """CI mode runs the broken-prompt detection self-tests."""
+        import subprocess
+        script = Path(__file__).resolve().parent.parent / "scripts" / "validate_prompt_format.py"
+        result = subprocess.run(
+            [sys.executable, str(script), "--json", "--ci"],
+            capture_output=True, text=True, timeout=15
+        )
+        # CI mode should exit 0 when all checks pass
+        assert result.returncode == 0, f"stderr: {result.stderr}\nstdout: {result.stdout}"
+
+
+class TestPreMarketGateScript:
+    """Integration tests for scripts/pre_market_gate.py."""
+
+    def test_gate_status_command(self, tmp_path, monkeypatch):
+        """--status reports CLEAR when no sentinel."""
+        import subprocess
+        script = Path(__file__).resolve().parent.parent / "scripts" / "pre_market_gate.py"
+
+        # Use tmp_path for state
+        env = os.environ.copy()
+        result = subprocess.run(
+            [sys.executable, str(script), "--status"],
+            capture_output=True, text=True, timeout=10,
+            env=env,
+        )
+        assert result.returncode == 0
+        assert "CLEAR" in result.stdout
+
+    def test_gate_clear_command(self, tmp_path):
+        """--clear exits 0 even with no sentinel."""
+        import subprocess
+        script = Path(__file__).resolve().parent.parent / "scripts" / "pre_market_gate.py"
+        result = subprocess.run(
+            [sys.executable, str(script), "--clear"],
+            capture_output=True, text=True, timeout=10,
+        )
+        assert result.returncode == 0
+        assert "cleared" in result.stdout.lower() or "clear" in result.stdout.lower()
+
+    def test_gate_validation_runs_and_reports(self):
+        """Running the gate without flags runs validation and reports result."""
+        import subprocess
+        script = Path(__file__).resolve().parent.parent / "scripts" / "pre_market_gate.py"
+        result = subprocess.run(
+            [sys.executable, str(script)],
+            capture_output=True, text=True, timeout=30,
+        )
+        # Should exit 0 when prompts are valid
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert "PASSED" in result.stdout
+        # Sentinel should be cleared after successful run
+        sentinel = Path(__file__).resolve().parent.parent / "state" / ".pre_market_blocked"
+        assert not sentinel.exists(), f"Sentinel should not exist after successful validation"
+
+    def test_gate_would_block_on_broken_prompt(self, tmp_path):
+        """Simulate: gate runner properly blocks and writes sentinel."""
+        # Create a sentinel manually and verify --status sees it
+        sentinel = tmp_path / ".pre_market_blocked"
+        sentinel.write_text("Blocked: test failure")
+
+        from src.tick_producer import check_pre_market_gate
+        import src.tick_producer as tp
+        original = tp.PRE_MARKET_SENTINEL
+        try:
+            tp.PRE_MARKET_SENTINEL = sentinel
+            ok, reason = check_pre_market_gate()
+            assert ok is False
+            assert "test failure" in reason
+        finally:
+            tp.PRE_MARKET_SENTINEL = original

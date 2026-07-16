@@ -17,6 +17,8 @@ from src.safety import (
     RecoveryManager,
 )
 
+pytestmark = pytest.mark.integration
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Circuit Breaker tests (§8)

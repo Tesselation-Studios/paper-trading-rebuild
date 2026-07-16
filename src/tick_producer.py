@@ -35,6 +35,10 @@ log = logging.getLogger("tick_producer")
 DB_DSN = "postgresql://trader:@192.168.1.179:5433/trading"
 DATA_BUS_URL = "http://docker.klo:5000/quotes"  # data bus endpoint for current quotes
 
+# Pre-market validation sentinel
+PROJECT_DIR = Path(__file__).resolve().parent.parent
+PRE_MARKET_SENTINEL = PROJECT_DIR / "state" / ".pre_market_blocked"
+
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Tick producer — enqueue market ticks")
@@ -123,6 +127,24 @@ def insert_ticks(conn, ticks: List[Dict[str, Any]]) -> int:
     return n
 
 
+def check_pre_market_gate() -> tuple[bool, str]:
+    """Check if pre-market format validation has passed.
+
+    Returns (ok, reason). If the sentinel file exists, the gate is blocked
+    and ticks must not be enqueued.
+
+    The sentinel is created by scripts/pre_market_gate.py (run via cron at
+    9:15 AM ET) and cleared on the next successful validation run.
+    """
+    if PRE_MARKET_SENTINEL.exists():
+        try:
+            reason = PRE_MARKET_SENTINEL.read_text().strip()
+        except Exception:
+            reason = "Unknown validation failure"
+        return False, reason
+    return True, ""
+
+
 def main() -> None:
     args = parse_args()
     level = logging.DEBUG if args.verbose else logging.INFO
@@ -131,6 +153,20 @@ def main() -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+
+    # 0. Pre-market validation gate — block ticks if prompts are broken
+    if not args.dry_run:
+        gate_ok, gate_reason = check_pre_market_gate()
+        if not gate_ok:
+            log.error(
+                "PRE-MARKET GATE BLOCKED — refusing to enqueue ticks: %s",
+                gate_reason,
+            )
+            log.error(
+                "Run 'python3 scripts/validate_prompt_format.py' to diagnose. "
+                "Remove state/.pre_market_blocked to override."
+            )
+            sys.exit(1)
 
     # 1. Fetch quotes from data bus
     ticks = fetch_quotes(args.data_bus)
