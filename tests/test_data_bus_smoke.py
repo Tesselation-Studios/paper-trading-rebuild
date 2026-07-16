@@ -122,11 +122,19 @@ class TestQuotes:
             assert "close" in q, f"{sym}: missing close"
             assert isinstance(q["close"], (int, float)), f"{sym}: close not numeric"
             assert "volume" in q, f"{sym}: missing volume"
-            assert "high" in q, f"{sym}: missing high"
-            assert "low" in q, f"{sym}: missing low"
-            assert "open" in q, f"{sym}: missing open"
             assert "source" in q, f"{sym}: missing source"
             assert "stale" in q, f"{sym}: missing stale"
+            assert "price" in q, f"{sym}: missing price"
+            assert "rsi" in q, f"{sym}: missing rsi"
+            assert "change_pct" in q, f"{sym}: missing change_pct"
+            assert "bb_lower" in q, f"{sym}: missing bb_lower"
+            assert "bb_mid" in q, f"{sym}: missing bb_mid"
+            assert "bb_upper" in q, f"{sym}: missing bb_upper"
+            assert "macd" in q, f"{sym}: missing macd"
+            assert "momentum" in q, f"{sym}: missing momentum"
+            assert "regime" in q, f"{sym}: missing regime"
+            assert "quote_age_seconds" in q, f"{sym}: missing quote_age_seconds"
+            assert "volume_ratio" in q, f"{sym}: missing volume_ratio"
 
     def test_meta_fields(self):
         data = _get("/quotes", {"symbols": self.SYMBOLS})
@@ -353,15 +361,16 @@ class TestMomentum:
         if data is None:
             pytest.skip("Momentum module not available in data bus")
         assert "avg_composite_z" in data
-        assert "signal" in data
-        assert data["signal"] == "cross_sectional_momentum"
-        assert "top_buys" in data
-        assert isinstance(data["top_buys"], list)
-        assert "top_avoids" in data
-        assert isinstance(data["top_avoids"], list)
+        assert "avg_top_quartile_z" in data
         assert "num_ranked" in data
         assert isinstance(data["num_ranked"], int), "num_ranked should be int"
         assert "market_regime" in data
+        assert "_fetched_at" in data
+        assert "pct_positive_roc" in data
+        assert "ranked" in data
+        assert isinstance(data["ranked"], list)
+        assert "z_score_range" in data
+        assert "roc_distribution" in data
 
     def test_z_score_is_float(self):
         data = self._get_or_skip("/momentum")
@@ -373,9 +382,9 @@ class TestMomentum:
         data = self._get_or_skip("/momentum")
         if data is None:
             pytest.skip("Momentum module not available in data bus")
-        # top_decile_avg_z may or may not be present; if it is, it's numeric
-        if "top_decile_avg_z" in data:
-            assert isinstance(data["top_decile_avg_z"], (int, float))
+        # avg_top_quartile_z should always be present and numeric
+        assert "avg_top_quartile_z" in data
+        assert isinstance(data["avg_top_quartile_z"], (int, float))
 
 
 # ── /congress ────────────────────────────────────────────────────────────────
