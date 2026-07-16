@@ -53,9 +53,11 @@ TRADER_CONFIG: Dict[str, Dict[str, Any]] = {
     "kairos": {
         "symbols": ["AAPL", "AMZN", "GOOGL", "META", "MSFT", "NVDA", "QQQ", "SPY", "TSLA"],
         "max_position_pct": 20.0,
-        "stop_loss_pct": 7.0,
-        "max_concurrent": 3,
+        "stop_loss_pct": 5.0,
+        "max_concurrent": 2,
         "label": "Kairos (Momentum + Signal)",
+        "min_conviction": 0.45,
+        "ticker_cooldown_ticks": 6,
     },
     "stonks": {
         "symbols": ["AAPL", "AMZN", "GOOGL", "META", "MSFT", "NVDA", "QQQ", "SPY", "TSLA"],
