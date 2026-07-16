@@ -22,6 +22,12 @@ _MOCK_PANDAS_TA = MagicMock()
 sys.modules.setdefault("pandas_ta", _MOCK_PANDAS_TA)
 
 
+def pytest_configure(config):
+    """Register custom markers to suppress pytest warnings."""
+    config.addinivalue_line("markers", "integration: env-dependent tests that need network/external services.")
+    config.addinivalue_line("markers", "smoke: quick smoke tests for data-bus endpoints.")
+
+
 @pytest.fixture(autouse=True)
 def mock_openclaw_env():
     """Suppress real env loading in all tests to avoid credential leakage."""

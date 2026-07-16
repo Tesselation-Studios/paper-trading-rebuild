@@ -34,7 +34,7 @@ _REBUILD_SRC = str(Path(__file__).resolve().parent.parent.parent / "paper-tradin
 if _REBUILD_SRC not in sys.path:
     sys.path.insert(0, _REBUILD_SRC)
 
-from metrics import objective_score, compute_calmar, compute_profit_factor
+from metrics import objective_score, compute_calmar, compute_profit_factor, compute_sharpe
 from replay import ReplayHarness, Tick, Portfolio, TraderDecision, ReplayResult
 from signals import SignalEngine, SignalParams
 
@@ -484,6 +484,170 @@ def _compute_walk_forward_metrics(
     }
 
 
+def _ttest_significance(
+    variant_scores: List[float],
+    baseline_scores: List[float],
+    alpha: float = 0.05,
+) -> Tuple[bool, float, float]:
+    """Welch's t-test for statistical significance of variant vs baseline.
+
+    H0: variant mean <= baseline mean (no improvement)
+    H1: variant mean > baseline mean (improvement)
+
+    Uses Welch's t-test (unequal variance). Returns (is_significant, t_stat, p_value).
+    One-tailed test: rejects H0 if t_stat >= critical value.
+
+    Args:
+        variant_scores: Per-window objective scores for the variant.
+        baseline_scores: Per-window objective scores for the baseline.
+        alpha: Significance level (default 0.05 for 95% confidence).
+
+    Returns:
+        (is_significant, t_stat, p_value) tuple.
+    """
+    from scipy import stats as scipy_stats
+
+    if len(variant_scores) < 2 or len(baseline_scores) < 2:
+        return False, 0.0, 1.0
+
+    v_arr = np.array(variant_scores, dtype=np.float64)
+    b_arr = np.array(baseline_scores, dtype=np.float64)
+
+    # Welch's t-test (unequal variance, two-sample)
+    t_stat, p_two_tailed = scipy_stats.ttest_ind(v_arr, b_arr, equal_var=False)
+
+    # One-tailed: we only care if variant > baseline
+    p_one_tailed = p_two_tailed / 2.0 if t_stat > 0 else 1.0 - p_two_tailed / 2.0
+
+    is_significant = p_one_tailed < alpha and t_stat > 0
+
+    return is_significant, float(t_stat), float(p_one_tailed)
+
+
+def _compute_sharpe_gates(
+    val_sharpes: List[float],
+    train_sharpes: List[float],
+    baseline_val_sharpes: List[float],
+) -> Tuple[bool, Dict[str, Any]]:
+    """Apply spec-mandated Sharpe-based acceptance gates.
+
+    From specs/validation.md:
+      1. Validation Sharpe > 0 (positive on unseen data)
+      2. Validation Sharpe > Baseline Sharpe (improved vs current params)
+      3. Validation Sharpe > Training Sharpe × 0.7 (not grossly overfit)
+
+    Args:
+        val_sharpes: Per-window validation Sharpe ratios for the variant.
+        train_sharpes: Per-window training Sharpe ratios for the variant.
+        baseline_val_sharpes: Per-window validation Sharpe ratios for baseline.
+
+    Returns:
+        (passed_all, diagnostics) tuple.
+    """
+    if not val_sharpes:
+        return False, {"reason": "no validation data"}
+
+    avg_val_sharpe = float(np.mean(val_sharpes))
+    avg_train_sharpe = float(np.mean(train_sharpes)) if train_sharpes else 0.0
+    avg_baseline_sharpe = float(np.mean(baseline_val_sharpes)) if baseline_val_sharpes else 0.0
+
+    gate_1 = avg_val_sharpe > 0
+    gate_2 = avg_val_sharpe > avg_baseline_sharpe
+    gate_3 = avg_val_sharpe > avg_train_sharpe * 0.7 if avg_train_sharpe > 0 else True
+
+    passed = gate_1 and gate_2 and gate_3
+
+    return passed, {
+        "avg_val_sharpe": avg_val_sharpe,
+        "avg_train_sharpe": avg_train_sharpe,
+        "avg_baseline_val_sharpe": avg_baseline_sharpe,
+        "gate_1_positive": gate_1,
+        "gate_2_vs_baseline": gate_2,
+        "gate_3_not_overfit": gate_3,
+    }
+
+
+_FREEZE_PATH = PROJECT_DIR / "shared" / "param_freeze.json"
+
+
+def _check_param_freeze(trader_short: str) -> Tuple[bool, Optional[str]]:
+    """Check if a trader's parameters are frozen (5-day lock after promotion).
+
+    Returns (is_frozen, reason_string_or_None).
+    """
+    if not _FREEZE_PATH.exists():
+        return False, None
+
+    try:
+        data = json.loads(_FREEZE_PATH.read_text())
+    except (json.JSONDecodeError, OSError):
+        return False, None
+
+    entry = data.get(trader_short)
+    if entry is None:
+        return False, None
+
+    frozen_until = entry.get("frozen_until")
+    if frozen_until is None:
+        return False, None
+
+    now = datetime.now().isoformat()
+    if now < frozen_until:
+        return True, f"Parameters frozen until {frozen_until} (promoted {entry.get('promoted_at', 'unknown')})"
+
+    return False, None
+
+
+def _record_param_freeze(
+    trader_short: str,
+    variant_name: str,
+    freeze_trading_days: int = 5,
+) -> None:
+    """Record a parameter freeze after a winning variant is promoted.
+
+    Locks the trader for freeze_trading_days trading days to evaluate
+    live performance before allowing further changes.
+
+    Per specs/validation.md: "Parameter changes frozen for 5 trading days
+    after acceptance."
+    """
+    # Calculate freeze end: freeze_trading_days trading days from now.
+    # Walk forward from today to find N future trading days.
+    cursor = datetime.now()
+    future_trading_days: List[str] = []
+    max_attempts = freeze_trading_days * 3
+    attempts = 0
+    while len(future_trading_days) < freeze_trading_days and attempts < max_attempts:
+        attempts += 1
+        cursor += timedelta(days=1)
+        if cursor.weekday() < 5:  # Mon-Fri only
+            future_trading_days.append(cursor.strftime("%Y-%m-%d"))
+
+    frozen_until = future_trading_days[-1] if future_trading_days else (
+        (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")
+    )
+
+    # Include full ISO timestamp for precise comparison
+    frozen_until_full = f"{frozen_until}T23:59:59"
+
+    data: Dict[str, Any] = {}
+    if _FREEZE_PATH.exists():
+        try:
+            data = json.loads(_FREEZE_PATH.read_text())
+        except (json.JSONDecodeError, OSError):
+            data = {}
+
+    data[trader_short] = {
+        "variant": variant_name,
+        "promoted_at": datetime.now().isoformat(),
+        "frozen_until": frozen_until_full,
+        "freeze_trading_days": freeze_trading_days,
+    }
+
+    _FREEZE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _FREEZE_PATH.write_text(json.dumps(data, indent=2))
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Data loading for replay
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -854,13 +1018,29 @@ def _run_multidate_sweep(
     Algorithm:
     1. Collect last N trading days before date_str.
     2. Build walk-forward windows (train, val).
-    3. Score baseline on each validation window.
-    4. Score each variant on each validation window.
-    5. Compute aggregate metrics (win_rate, avg_val_score, val_stability).
-    6. Apply winner criteria: win_rate >= 0.6, avg_val_score > baseline + 0.05,
-       val_stability < 2 * baseline_val_stability.
-    7. Promote winner via git branch creation.
+    3. Enforce minimum 5 out-of-sample validation dates per SPEC.
+    4. Score baseline on train+val, track Sharpe ratios.
+    5. Score each variant on train+val, track Sharpe ratios.
+    6. Apply spec gates:
+       a. Win-rate and stability (existing).
+       b. Sharpe gates: Val Sharpe > 0, > Baseline, > Train Sharpe × 0.7.
+       c. t-test significance (95% confidence).
+    7. Record parameter freeze on promotion (5 trading days).
+    8. Promote winner via git branch creation.
     """
+    # ── Parameter freeze check ──────────────────────────────────────────
+    is_frozen, freeze_reason = _check_param_freeze(trader_short)
+    if is_frozen:
+        print(f"  ⏸️  SKIPPING: {freeze_reason}")
+        return SweepResult(
+            trader=trader_short,
+            date=date_str,
+            baseline_score=0.0,
+            variants=[],
+            winner=None,
+            branch_name=None,
+        )
+
     baseline_params = _extract_params_from_prompt(prompt_text)
 
     # 1. Get trading days
@@ -875,12 +1055,28 @@ def _run_multidate_sweep(
             f"{train_days + val_days} days, got {len(dates)}. "
             f"Reduce --train or --val, or increase --dates."
         )
-    print(f"  Walk-forward windows: {len(windows)} "
-          f"(train={train_days}d, val={val_days}d)")
 
-    # 3. Score baseline on each validation window
-    print(f"  Scoring baseline across {len(windows)} windows...")
+    # ── SPEC: Minimum 5 out-of-sample dates ──────────────────────────────
+    MIN_OOS_WINDOWS = 5
+    if len(windows) < MIN_OOS_WINDOWS:
+        raise ValueError(
+            f"SPEC requires at least {MIN_OOS_WINDOWS} out-of-sample validation "
+            f"windows. Got {len(windows)} windows with {n_dates} dates "
+            f"(train={train_days}, val={val_days}). "
+            f"Increase --dates to at least "
+            f"{train_days + val_days + MIN_OOS_WINDOWS - 1}."
+        )
+
+    print(f"  Walk-forward windows: {len(windows)} "
+          f"(train={train_days}d, val={val_days}d) "
+          f"✓ min {MIN_OOS_WINDOWS} OOS windows met")
+
+    # 3. Score baseline on train + val, track Sharpe ratios
+    print(f"  Scoring baseline across {len(windows)} windows (train + val)...")
     baseline_val_scores: List[float] = []
+    baseline_val_sharpes: List[float] = []
+    baseline_train_scores: List[float] = []
+    baseline_train_sharpes: List[float] = []
     baseline = PromptVariant(
         trader=trader_short,
         variant_id=0,
@@ -892,34 +1088,80 @@ def _run_multidate_sweep(
     )
 
     for wi, (train_dates, val_dates) in enumerate(windows):
+        # Train data
+        train_ticks = _load_dates_data(train_dates)
+        bts, bts_result = score_variant(baseline, train_ticks, cost_model=cost_model)
+        baseline_train_scores.append(bts)
+        baseline_train_sharpes.append(
+            compute_sharpe(bts_result.returns) if len(bts_result.returns) > 1 else 0.0
+        )
+
+        # Val data
         val_ticks = _load_dates_data(val_dates)
-        bs, _ = score_variant(baseline, val_ticks, cost_model=cost_model)
+        bs, bs_result = score_variant(baseline, val_ticks, cost_model=cost_model)
         baseline_val_scores.append(bs)
+        baseline_val_sharpes.append(
+            compute_sharpe(bs_result.returns) if len(bs_result.returns) > 1 else 0.0
+        )
+
         if (wi + 1) % max(1, len(windows) // 5) == 0:
-            print(f"    Baseline window {wi + 1}/{len(windows)}: score={bs:.4f}")
+            print(f"    Baseline window {wi + 1}/{len(windows)}: "
+                  f"score={bs:.4f}, val_sharpe={baseline_val_sharpes[-1]:.3f}")
 
     baseline_metrics = _compute_walk_forward_metrics(
         baseline_val_scores, baseline_val_scores
     )
     print(f"  Baseline: avg={baseline_metrics['avg_val_score']:.4f}, "
-          f"stability={baseline_metrics['val_stability']:.4f}")
+          f"stability={baseline_metrics['val_stability']:.4f}, "
+          f"val_sharpe={np.mean(baseline_val_sharpes):.3f}")
 
-    # 4. Generate and score variants
+    # 4. Generate and score variants on train + val
     variants = generate_variants(trader_short, prompt_text, n_variants)
-    print(f"  Scoring {len(variants)} variants across {len(windows)} windows...")
+    print(f"  Scoring {len(variants)} variants across {len(windows)} windows "
+          f"(train + val)...")
 
     for vi, variant in enumerate(variants):
         val_scores: List[float] = []
+        val_sharpes: List[float] = []
+        train_scores: List[float] = []
+        train_sharpes: List[float] = []
+
         for train_dates, val_dates in windows:
+            # Train data
+            train_ticks = _load_dates_data(train_dates)
+            ts, ts_result = score_variant(variant, train_ticks, cost_model=cost_model)
+            train_scores.append(ts)
+            train_sharpes.append(
+                compute_sharpe(ts_result.returns) if len(ts_result.returns) > 1 else 0.0
+            )
+
+            # Val data
             val_ticks = _load_dates_data(val_dates)
-            vs, result = score_variant(variant, val_ticks, cost_model=cost_model)
+            vs, vs_result = score_variant(variant, val_ticks, cost_model=cost_model)
             val_scores.append(vs)
+            val_sharpes.append(
+                compute_sharpe(vs_result.returns) if len(vs_result.returns) > 1 else 0.0
+            )
 
         variant.val_scores = val_scores
         metrics = _compute_walk_forward_metrics(val_scores, baseline_val_scores)
         variant.avg_val_score = metrics["avg_val_score"]
         variant.val_stability = metrics["val_stability"]
         variant.win_rate = metrics["win_rate"]
+
+        # ── SPEC Sharpe gates ─────────────────────────────────────────
+        sharpe_passed, sharpe_diag = _compute_sharpe_gates(
+            val_sharpes, train_sharpes, baseline_val_sharpes
+        )
+
+        # ── t-test significance ───────────────────────────────────────
+        t_sig, t_stat, t_pval = _ttest_significance(val_scores, baseline_val_scores)
+
+        # Attach diagnostics to variant (add attrs dynamically for logging)
+        variant.sharpe_diag = sharpe_diag  # type: ignore[attr-defined]
+        variant.t_sig = t_sig  # type: ignore[attr-defined]
+        variant.t_stat = t_stat  # type: ignore[attr-defined]
+        variant.t_pval = t_pval  # type: ignore[attr-defined]
 
         # Also compute single-date metrics on the last validation window (for display)
         last_val_dates = windows[-1][1]
@@ -936,15 +1178,19 @@ def _run_multidate_sweep(
         ]))
         variant.n_trades = len(last_result.trades)
 
+        sig_flag = " ✓sig" if t_sig else ""
+        sharpe_flag = " ✓sharpe" if sharpe_passed else " ✗sharpe"
         print(f"    [{vi + 1}/{len(variants)}] {variant.variant_name}: "
               f"avg_val={variant.avg_val_score:.4f}, "
               f"win_rate={variant.win_rate:.1%}, "
-              f"stability={variant.val_stability:.4f}")
+              f"stability={variant.val_stability:.4f}, "
+              f"val_sharpe={np.mean(val_sharpes):.3f}, "
+              f"t={t_stat:.2f}(p={t_pval:.3f}){sig_flag}{sharpe_flag}")
 
     # Sort by avg_val_score descending
     variants.sort(key=lambda v: v.avg_val_score, reverse=True)
 
-    # 5. Winner criteria (must pass ALL)
+    # 5. Winner criteria (must pass ALL gates)
     winner: Optional[PromptVariant] = None
     branch_name: Optional[str] = None
 
@@ -956,7 +1202,22 @@ def _run_multidate_sweep(
             or v.val_stability < 2.0 * baseline_metrics["val_stability"]
         )
 
-        if passes_win_rate and passes_avg_score and passes_stability:
+        # SPEC gates
+        sharpe_diag = getattr(v, "sharpe_diag", {})
+        passes_sharpe = sharpe_diag.get("gate_1_positive", False) and \
+                        sharpe_diag.get("gate_2_vs_baseline", False) and \
+                        sharpe_diag.get("gate_3_not_overfit", False)
+        passes_ttest = getattr(v, "t_sig", False)
+
+        all_gates = {
+            "win_rate": passes_win_rate,
+            "avg_score": passes_avg_score,
+            "stability": passes_stability,
+            "sharpe": passes_sharpe,
+            "ttest": passes_ttest,
+        }
+
+        if all(all_gates.values()):
             winner = v
             print(f"\n  🏆 Winner: {v.variant_name}")
             print(f"     avg_val_score: {v.avg_val_score:.4f} "
@@ -964,16 +1225,63 @@ def _run_multidate_sweep(
             print(f"     win_rate: {v.win_rate:.1%}")
             print(f"     stability: {v.val_stability:.4f} "
                   f"(baseline: {baseline_metrics['val_stability']:.4f})")
+            print(f"     sharpe gates: val={sharpe_diag.get('avg_val_sharpe', 0):.3f} "
+                  f"train={sharpe_diag.get('avg_train_sharpe', 0):.3f} "
+                  f"(positive={sharpe_diag.get('gate_1_positive')}, "
+                  f"vs_baseline={sharpe_diag.get('gate_2_vs_baseline')}, "
+                  f"not_overfit={sharpe_diag.get('gate_3_not_overfit')})")
+            print(f"     t-test: t={getattr(v, 't_stat', 0):.2f}, "
+                  f"p={getattr(v, 't_pval', 1):.4f} (significant={passes_ttest})")
 
-            branch_name = create_winner_branch(
-                trader_short, v, date_str, dry_run=dry_run,
-            )
+            if not dry_run:
+                branch_name = create_winner_branch(
+                    trader_short, v, date_str, dry_run=dry_run,
+                )
+                # ── Record parameter freeze (5 trading days) ──────────
+                if branch_name:
+                    _record_param_freeze(trader_short, v.variant_name)
+                    print(f"     🔒 Parameters frozen for 5 trading days")
             break
 
     if winner is None:
+        failed_gates = []
+        # Check all variants to report why none passed
+        for v in variants:
+            sharpe_diag = getattr(v, "sharpe_diag", {})
+            passes_sharpe = sharpe_diag.get("gate_1_positive", False) and \
+                            sharpe_diag.get("gate_2_vs_baseline", False) and \
+                            sharpe_diag.get("gate_3_not_overfit", False)
+            passes_ttest = getattr(v, "t_sig", False)
+            passes_win_rate = v.win_rate >= 0.6
+            passes_avg_score = v.avg_val_score > baseline_metrics["avg_val_score"] + 0.05
+            passes_stability = (
+                baseline_metrics["val_stability"] == 0.0
+                or v.val_stability < 2.0 * baseline_metrics["val_stability"]
+            )
+            failures = []
+            if not passes_win_rate:
+                failures.append(f"win_rate={v.win_rate:.1%}")
+            if not passes_avg_score:
+                failures.append(f"avg={v.avg_val_score:.3f}≤BL+0.05")
+            if not passes_stability:
+                failures.append(f"stability={v.val_stability:.3f}≥2×BL")
+            if not passes_sharpe:
+                failures.append(
+                    f"sharpe(val={sharpe_diag.get('avg_val_sharpe', 0):.2f},"
+                    f"pos={sharpe_diag.get('gate_1_positive')},"
+                    f"BL={sharpe_diag.get('gate_2_vs_baseline')},"
+                    f"overfit={sharpe_diag.get('gate_3_not_overfit')})"
+                )
+            if not passes_ttest:
+                t_s = getattr(v, "t_stat", 0)
+                t_p = getattr(v, "t_pval", 1)
+                failures.append(f"ttest(t={t_s:.2f},p={t_p:.3f})")
+            if failures:
+                print(f"    {v.variant_name}: FAILED [{', '.join(failures)}]")
+
         print(f"\n  ❌ No variant passed all walk-forward criteria")
-        print(f"     Required: win_rate >= 0.6, avg_val > baseline + 0.05, "
-              f"stability < 2× baseline")
+        print(f"     Required: win_rate ≥ 0.6, avg_val > baseline + 0.05, "
+              f"stability < 2× baseline, Sharpe gates, t-test p < 0.05")
 
     return SweepResult(
         trader=trader_short,

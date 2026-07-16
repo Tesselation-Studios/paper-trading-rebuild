@@ -32,6 +32,8 @@ from src.prompt_sweep import (
     SignalParams,
 )
 
+pytestmark = pytest.mark.integration
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Fixtures

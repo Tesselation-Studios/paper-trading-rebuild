@@ -25,6 +25,8 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from src.risk.gates import CashGate, PositionGate, ExposureGate, PDTGate, HoursGate, ConvictionGate
 from src.risk.manager import RiskManager
 
+pytestmark = pytest.mark.integration
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # CashGate Tests

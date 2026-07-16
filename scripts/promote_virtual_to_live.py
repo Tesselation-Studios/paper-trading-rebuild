@@ -99,6 +99,19 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="Reverse the last promotion for this virtual trader",
     )
     p.add_argument("--dry-run", action="store_true", help="Preview mode, no changes")
+    p.add_argument(
+        "--require-validation",
+        action="store_true",
+        default=True,
+        help="Require walk-forward validation before promoting (Architectural Invariant #7). "
+             "Use --no-require-validation to bypass.",
+    )
+    p.add_argument(
+        "--no-require-validation",
+        action="store_false",
+        dest="require_validation",
+        help="Bypass validation gate (emergency override only).",
+    )
     p.add_argument("--db-dsn", default=DB_DSN, help="Postgres DSN")
     p.add_argument("-v", "--verbose", action="store_true", help="Verbose logging")
     return p.parse_args(argv)
@@ -431,6 +444,129 @@ def demote_live_to_virtual(
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# Validation gate (Architectural Invariant #7)
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def _extract_params_from_virtual(virtual: Dict[str, Any], base_trader: str) -> Dict[str, Any]:
+    """Extract signal parameters from a virtual trader record.
+
+    Combines the virtual's params JSONB with any config.yaml overrides
+    from the live trader directory.
+    """
+    params = virtual.get("params", {}) or {}
+    if isinstance(params, str):
+        params = json.loads(params)
+
+    # If virtual has its own config, merge it
+    virtual_dir = live_trader_dir(virtual.get("name", ""))
+    if virtual_dir and virtual_dir.exists():
+        virtual_config = read_trader_config(virtual_dir) or {}
+        for key, val in virtual_config.items():
+            if isinstance(val, dict) and isinstance(params.get(key), dict):
+                params.setdefault(key, {}).update(val)
+            elif key not in params:
+                params[key] = val
+
+    return params
+
+
+def _extract_baseline_params(base_trader: str) -> Dict[str, Any]:
+    """Extract the current production parameters from the live trader config."""
+    trader_dir = live_trader_dir(base_trader)
+    if not trader_dir.exists():
+        log.warning("Live trader directory not found: %s", trader_dir)
+        return {}
+
+    config = read_trader_config(trader_dir) or {}
+    # Filter to signal-related params (the ones WalkForwardValidator cares about)
+    signal_keys = {
+        "momentum_threshold", "momentum_weight", "rsi_weight",
+        "rsi_oversold", "rsi_overbought", "stop_loss_pct",
+        "take_profit_pct", "max_position_pct", "min_conviction",
+        "volatility_filter", "trend_filter", "volume_filter",
+        "position_size", "max_positions", "cooldown_ticks",
+    }
+    params = {}
+    for key in signal_keys:
+        if key in config:
+            params[key] = config[key]
+
+    return params
+
+
+def _run_validation_gate(
+    virtual: Dict[str, Any],
+    base_trader: str,
+    dry_run: bool = False,
+) -> None:
+    """Run walk-forward validation gate before promotion.
+
+    Architectural Invariant #7: No parameter change accepted without
+    validation on unseen data.
+
+    Extracts candidate + baseline params, runs WalkForwardValidator,
+    and blocks promotion if the gate fails.
+
+    Args:
+        virtual: Virtual trader record from DB.
+        base_trader: Live trader name.
+        dry_run: Preview mode.
+
+    Raises:
+        SystemExit: If validation gate rejects the change.
+    """
+    from src.validation_gate import ValidationGate, GateConfig
+
+    candidate_params = _extract_params_from_virtual(virtual, base_trader)
+    baseline_params = _extract_baseline_params(base_trader)
+
+    if not candidate_params:
+        log.warning(
+            "No candidate params to validate for '%s'. "
+            "Skipping validation gate.",
+            virtual.get("name", "?"),
+        )
+        return
+
+    log.info(
+        "Validation gate: checking %d candidate params vs %d baseline params",
+        len(candidate_params), len(baseline_params),
+    )
+    log.debug("Candidate params: %s", json.dumps(candidate_params, indent=2))
+    log.debug("Baseline params: %s", json.dumps(baseline_params, indent=2))
+
+    if dry_run:
+        log.info("DRY RUN: would run walk-forward validation gate")
+        return
+
+    gate = ValidationGate(config=GateConfig(require_validation=True))
+    result = gate.check(
+        candidate_params=candidate_params,
+        baseline_params=baseline_params,
+        trader_id=base_trader,
+    )
+
+    if not result.passed:
+        log.error("❌ Validation gate REJECTED promotion: %s", result.reason)
+        print(f"\n❌ Architectural Invariant #7: Validation gate REJECTED")
+        print(f"   {result.reason}")
+        if result.validation:
+            print(f"   Train Sharpe:  {result.validation.train_sharpe:.3f}")
+            print(f"   Val Sharpe:    {result.validation.val_sharpe:.3f}")
+            print(f"   Baseline Val:  {result.validation.baseline_val_sharpe:.3f}")
+            print(f"   Confidence:    {result.validation.confidence:.2f}")
+            print(f"   Checks:        {result.validation.checks}")
+        print(f"\n   Use --force or --no-require-validation to bypass "
+              f"(emergency only).\n")
+        sys.exit(1)
+
+    log.info("✓ Validation gate PASSED: %s", result.reason)
+    print(f"\n✓ Validation gate PASSED (Architectural Invariant #7)")
+    print(f"  {result.reason}")
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # Promotion logic
 # ══════════════════════════════════════════════════════════════════════════
 
@@ -734,7 +870,11 @@ def main() -> None:
             args.name, base_trader, virtual.get("score", 0.0) or 0.0,
         )
 
-        # Step 2: Compute scores
+        # Step 2: Validation gate (Architectural Invariant #7)
+        if args.require_validation and not args.force:
+            _run_validation_gate(virtual, base_trader, args.dry_run)
+
+        # Step 3: Compute scores
         virtual_agent_id = args.name  # virtuals log as their name
         live_agent_id = base_trader   # live traders log as their agent_id
 
@@ -752,7 +892,7 @@ def main() -> None:
             live_score, len(live_pnl),
         )
 
-        # Step 3: Check threshold (unless --force)
+        # Step 4: Check threshold (unless --force)
         if not args.force:
             if len(virtual_pnl) < 1:
                 log.warning(
@@ -788,7 +928,7 @@ def main() -> None:
             improvement = 0.0  # Not applicable with --force
             passes = True
 
-        # Step 4: Perform the promotion
+        # Step 5: Perform the promotion
         ok = perform_promotion(
             conn,
             virtual,
