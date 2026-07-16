@@ -6,6 +6,11 @@ on:
     workflows: ["CI"]
     types: [completed]
 
+permissions:
+  contents: write
+  pull-requests: write
+  checks: read
+
 jobs:
   auto-merge:
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
