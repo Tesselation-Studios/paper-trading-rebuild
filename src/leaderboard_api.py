@@ -41,6 +41,13 @@ app = Flask(__name__)
 # ── constants ─────────────────────────────────────────────────────────────────
 STARTING_VALUE = 10_000.0
 
+# Trader tick intervals in minutes (matching SPEC §4.1)
+TRADER_TICK_INTERVALS = {
+    "kairos": 5,
+    "aldridge": 30,
+    "stonks": 15,
+}
+
 TRADER_META = [
     {"id": "kairos",   "name": "Kairós Capital",     "manager": "Zara Chen"},
     {"id": "aldridge", "name": "Aldridge & Partners", "manager": "Edmund Whitfield"},
@@ -119,6 +126,33 @@ def _seconds_ago(ts: str) -> Optional[int]:
         return max(0, int((now - dt).total_seconds()))
     except Exception:
         return None
+
+
+def _compute_agent_status(trader_id: str, last_hb: Optional[str]) -> str:
+    """Compute agent status from last heartbeat timestamp.
+
+    Returns one of: 'ticking', 'stalled', 'crashed', 'unknown'.
+    - 'ticking': last heartbeat within 2× tick interval
+    - 'stalled': last heartbeat within 5× tick interval but > 2×
+    - 'crashed': no heartbeat or > 5× tick interval
+    - 'unknown': no tick interval configured
+    """
+    interval_min = TRADER_TICK_INTERVALS.get(trader_id)
+    if interval_min is None:
+        return "unknown"
+
+    ago_s = _seconds_ago(last_hb) if last_hb else None
+    if ago_s is None:
+        return "crashed"
+
+    tick_s = interval_min * 60
+    # 2× for stalled, 5× for crashed
+    if ago_s <= tick_s * 2:
+        return "ticking"
+    elif ago_s <= tick_s * 5:
+        return "stalled"
+    else:
+        return "crashed"
 
 
 def _is_option_symbol(symbol: str) -> bool:
@@ -697,6 +731,7 @@ def api_traders():
             # Last heartbeat timing
             "last_heartbeat":   last_hb,
             "last_heartbeat_ago_s": _seconds_ago(last_hb) if last_hb else None,
+            "agent_status":   _compute_agent_status(company, last_hb),
             # Last tick = same as last heartbeat (ticks merged into heartbeat)
             "last_tick_ago_s": _seconds_ago(last_hb) if last_hb else None,
             # Open positions from Alpaca (tagged with is_option)

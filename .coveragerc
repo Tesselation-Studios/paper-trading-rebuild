@@ -1,0 +1,18 @@
+[run]
+source = src
+omit =
+    tests/*
+    .venv/*
+    migrations/*
+    */__pycache__/*
+    *.pyc
+
+[report]
+exclude_lines =
+    pragma: no cover
+    def __repr__
+    def __str__
+    raise NotImplementedError
+    if __name__ == .__main__.:
+    class.*\bProtocol\b
+    @(abc\.)?abstractmethod

@@ -406,3 +406,206 @@ class TestMain:
             with patch.object(sys, "argv", ["d_state_watchdog.py", "--quiet"]):
                 exit_code = main()
                 assert exit_code == 1
+
+
+# ── Restart functionality ─────────────────────────────────────────────────
+
+class TestRestartStalledTraders:
+    """Tests for _restart_stalled_traders — auto-restart via SSH."""
+
+    def _make_report(self, d_state=None, warnings=None, ok=None):
+        """Build a WatchdogReport with given statuses."""
+        now = datetime.now(timezone.utc)
+        report = WatchdogReport(timestamp=now)
+        traders = []
+        if d_state:
+            for tid in d_state:
+                traders.append(TraderStatus(
+                    trader_id=tid, is_active=True,
+                    severity="critical", is_d_state=True,
+                ))
+        if warnings:
+            for tid in warnings:
+                traders.append(TraderStatus(
+                    trader_id=tid, is_active=True,
+                    last_heartbeat=now - timedelta(minutes=20),
+                    severity="warning",
+                ))
+        if ok:
+            for tid in ok:
+                traders.append(TraderStatus(
+                    trader_id=tid, is_active=True,
+                    last_heartbeat=now, severity="ok",
+                ))
+        report.traders = traders
+        report.checked_traders = len(traders)
+        report.d_state_traders = len(d_state or [])
+        report.warning_traders = len(warnings or [])
+        report.ok_traders = len(ok or [])
+        return report
+
+    def test_no_alerts_no_restart(self):
+        """All traders healthy → no restart attempted."""
+        from src.d_state_watchdog import _restart_stalled_traders
+        report = self._make_report(ok=["kairos", "aldridge", "stonks"])
+        results = _restart_stalled_traders(report)
+        assert results == {}
+
+    def test_restarts_d_state(self):
+        """D-state trader triggers gateway restart."""
+        from src.d_state_watchdog import _restart_stalled_traders
+        report = self._make_report(
+            d_state=["stonks"],
+            ok=["kairos", "aldridge"],
+        )
+        with patch("src.d_state_watchdog.subprocess.run") as mock_run:
+            mock_result = MagicMock()
+            mock_result.returncode = 0
+            mock_result.stdout = ""
+            mock_result.stderr = ""
+            mock_run.return_value = mock_result
+
+            results = _restart_stalled_traders(report)
+
+            assert results["stonks"] == "restarted"
+            assert "kairos" not in results
+            assert "aldridge" not in results
+            mock_run.assert_called_once()
+
+    def test_restarts_warnings_too(self):
+        """Warning traders also trigger restart."""
+        from src.d_state_watchdog import _restart_stalled_traders
+        report = self._make_report(
+            warnings=["kairos"],
+            ok=["aldridge", "stonks"],
+        )
+        with patch("src.d_state_watchdog.subprocess.run") as mock_run:
+            mock_result = MagicMock()
+            mock_result.returncode = 0
+            mock_result.stdout = ""
+            mock_result.stderr = ""
+            mock_run.return_value = mock_result
+
+            results = _restart_stalled_traders(report)
+
+            assert results["kairos"] == "restarted"
+            mock_run.assert_called_once()
+
+    def test_restart_failure(self):
+        """SSH failure returns error per trader."""
+        from src.d_state_watchdog import _restart_stalled_traders
+        report = self._make_report(
+            d_state=["stonks"],
+            ok=["kairos", "aldridge"],
+        )
+        with patch("src.d_state_watchdog.subprocess.run") as mock_run:
+            mock_result = MagicMock()
+            mock_result.returncode = 1
+            mock_result.stdout = ""
+            mock_result.stderr = "Connection refused"
+            mock_run.return_value = mock_result
+
+            results = _restart_stalled_traders(report)
+
+            assert "failed" in results["stonks"]
+            assert "Connection refused" in results["stonks"]
+
+    def test_restart_timeout(self):
+        """SSH timeout returns error."""
+        from src.d_state_watchdog import _restart_stalled_traders
+        report = self._make_report(d_state=["stonks"], ok=["kairos", "aldridge"])
+        with patch("src.d_state_watchdog.subprocess.run") as mock_run:
+            import subprocess
+            mock_run.side_effect = subprocess.TimeoutExpired(cmd="ssh", timeout=30)
+
+            results = _restart_stalled_traders(report)
+
+            assert "SSH timeout" in results["stonks"]
+
+    def test_ssh_not_found(self):
+        """ssh binary not available."""
+        from src.d_state_watchdog import _restart_stalled_traders
+        report = self._make_report(d_state=["stonks"], ok=["kairos", "aldridge"])
+        with patch("src.d_state_watchdog.subprocess.run") as mock_run:
+            mock_run.side_effect = FileNotFoundError("ssh")
+
+            results = _restart_stalled_traders(report)
+
+            assert "ssh not found" in results["stonks"]
+
+    def test_multiple_d_state_single_restart(self):
+        """Multiple D-state traders → single gateway restart, all marked restarted."""
+        from src.d_state_watchdog import _restart_stalled_traders
+        report = self._make_report(
+            d_state=["stonks", "kairos"],
+            ok=["aldridge"],
+        )
+        with patch("src.d_state_watchdog.subprocess.run") as mock_run:
+            mock_result = MagicMock()
+            mock_result.returncode = 0
+            mock_result.stdout = ""
+            mock_result.stderr = ""
+            mock_run.return_value = mock_result
+
+            results = _restart_stalled_traders(report)
+
+            assert results["stonks"] == "restarted"
+            assert results["kairos"] == "restarted"
+            assert "aldridge" not in results
+            # Only one SSH call
+            assert mock_run.call_count == 1
+
+    def test_main_with_restart_flag(self):
+        """main() with --restart triggers gateway restart when D-state."""
+        from src.d_state_watchdog import main
+        with patch("src.d_state_watchdog.check_all_traders") as mock_check, \
+             patch("src.d_state_watchdog._restart_stalled_traders") as mock_restart:
+            now = datetime.now(timezone.utc)
+            mock_report = WatchdogReport(timestamp=now)
+            mock_report.ok_traders = 2
+            mock_report.d_state_traders = 1
+            mock_report.checked_traders = 3
+            mock_report.traders = [
+                TraderStatus(trader_id="kairos", is_active=True,
+                             last_heartbeat=now, severity="ok"),
+                TraderStatus(trader_id="stonks", is_active=True,
+                             severity="critical", is_d_state=True,
+                             error="No activity"),
+                TraderStatus(trader_id="aldridge", is_active=True,
+                             last_heartbeat=now, severity="ok"),
+            ]
+            mock_check.return_value = mock_report
+            mock_restart.return_value = {"stonks": "restarted"}
+
+            with patch.object(sys, "argv", [
+                "d_state_watchdog.py", "--restart", "--quiet"
+            ]):
+                exit_code = main()
+                assert exit_code == 1  # still reports D-state
+                mock_restart.assert_called_once()
+
+    def test_main_with_restart_no_alerts_no_call(self):
+        """main() with --restart but all healthy → no restart call."""
+        from src.d_state_watchdog import main
+        with patch("src.d_state_watchdog.check_all_traders") as mock_check, \
+             patch("src.d_state_watchdog._restart_stalled_traders") as mock_restart:
+            now = datetime.now(timezone.utc)
+            mock_report = WatchdogReport(timestamp=now)
+            mock_report.ok_traders = 3
+            mock_report.checked_traders = 3
+            mock_report.traders = [
+                TraderStatus(trader_id="kairos", is_active=True,
+                             last_heartbeat=now, severity="ok"),
+                TraderStatus(trader_id="aldridge", is_active=True,
+                             last_heartbeat=now, severity="ok"),
+                TraderStatus(trader_id="stonks", is_active=True,
+                             last_heartbeat=now, severity="ok"),
+            ]
+            mock_check.return_value = mock_report
+
+            with patch.object(sys, "argv", [
+                "d_state_watchdog.py", "--restart", "--quiet"
+            ]):
+                exit_code = main()
+                assert exit_code == 0
+                mock_restart.assert_not_called()
