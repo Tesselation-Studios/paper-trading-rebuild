@@ -1071,14 +1071,14 @@ function setStatus(state) {
 // ── Format helpers ────────────────────────────────────────────────────
 
 function fmtMoney(n) {
-  if (n == null) return '—';
-  return '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  if (n == null || isNaN(n)) return '&mdash;';
+  return '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
 function fmtPct(n) {
-  if (n == null) return '—';
+  if (n == null || isNaN(n)) return '&mdash;';
   const sign = n >= 0 ? '+' : '';
-  return sign + n.toFixed(2) + '%';
+  return sign + Number(n).toFixed(2) + '%';
 }
 
 function fmtAgo(secs) {
@@ -1346,6 +1346,7 @@ function closeModal(event) {
 }
 
 function renderModalPositions(positions) {
+  const totalMV = positions.reduce((s, p) => s + (p.market_value || 0), 0);
   return `
   <table class="modal-positions-table">
     <thead>
@@ -1354,6 +1355,7 @@ function renderModalPositions(positions) {
         <th>Qty</th>
         <th>Cost Basis</th>
         <th>Mkt Value</th>
+        <th>Alloc</th>
         <th>P&amp;L %</th>
         <th>Exit Condition</th>
       </tr>
@@ -1364,12 +1366,16 @@ function renderModalPositions(positions) {
         const exitCond = p.exit_condition || p.stop_loss ? (p.exit_condition || 'stop_loss') : '';
         const horizon = p.holding_horizon_days ? `${p.holding_horizon_days}d` : '';
         const exitLabel = exitCond ? (horizon ? `${exitCond} / ${horizon}` : exitCond) : '&mdash;';
+        const allocPct = p.allocation_pct != null ? p.allocation_pct
+          : totalMV > 0 ? Math.round((p.market_value || 0) / totalMV * 1000) / 10
+          : 0;
         return `
         <tr>
           <td>${escHtml(p.ticker)}</td>
           <td>${p.qty != null ? p.qty : '&mdash;'}</td>
           <td style="color:var(--muted)">${fmtMoney(p.avg_entry || p.cost_basis)}</td>
           <td>${fmtMoney(p.market_value)}</td>
+          <td style="color:var(--muted)">${allocPct}%</td>
           <td class="${plClass}">${fmtPct(p.unrealized_plpc)}</td>
           <td style="font-size:11px;color:var(--yellow);max-width:120px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${escHtml(exitCond)}">${exitLabel}</td>
         </tr>`;
@@ -1542,8 +1548,13 @@ function traderHoldingsPie(t) {
   const positions = t.positions || [];
   const cashVal   = t.cash || 0;
   const allSlices = [
-    ...positions.map(p => ({ label: p.ticker, value: p.market_value, pl: p.unrealized_plpc })),
-    ...(cashVal > 0 ? [{ label: 'CASH', value: cashVal, pl: null }] : []),
+    ...positions.map(p => ({
+      label: p.ticker,
+      value: p.market_value || 0,
+      pl: p.unrealized_plpc,
+      allocPct: p.allocation_pct,
+    })),
+    ...(cashVal > 0 ? [{ label: 'CASH', value: cashVal, pl: null, allocPct: null }] : []),
   ].filter(s => s.value > 0);
 
   const total = allSlices.reduce((s, x) => s + x.value, 0);
@@ -1591,7 +1602,7 @@ function holdingsPie(slices, total) {
   // Legend rows
   const legend = slices.map((s, i) => {
     const color   = s.label === 'CASH' ? '#30363d' : SLICE_COLORS[i % SLICE_COLORS.length];
-    const pct     = total > 0 ? Math.round(s.value / total * 100) : 0;
+    const pct     = s.allocPct != null ? s.allocPct : (total > 0 ? Math.round(s.value / total * 100) : 0);
     const plClass = s.pl == null ? '' : s.pl >= 0 ? 'pl-positive' : 'pl-negative';
     const plStr   = s.pl != null ? `<span class="${plClass}" style="margin-left:4px">${fmtPct(s.pl)}</span>` : '';
     return `<div style="display:flex;align-items:center;gap:6px;padding:2px 0">

@@ -681,13 +681,16 @@ def api_traders():
         pv  = portfolio["portfolio_value"] if portfolio else None
         pct = round((pv - STARTING_VALUE) / STARTING_VALUE * 100, 2) if pv else None
 
-        # Tag positions as option or equity
+        # Tag positions as option or equity, compute allocation
         positions = portfolio.get("positions", []) if portfolio else []
         options_exposure = 0.0
         for pos in positions:
             pos["is_option"] = _is_option_symbol(pos.get("ticker", pos.get("symbol", "")))
+            mv = float(pos.get("market_value", 0) or 0)
             if pos["is_option"]:
-                options_exposure += float(pos.get("market_value", 0) or 0)
+                options_exposure += mv
+            # Pre-compute allocation % for frontend display
+            pos["allocation_pct"] = round((mv / pv * 100), 1) if pv and pv > 0 else 0.0
         options_pct = round((options_exposure / pv * 100), 1) if pv and pv > 0 else 0
 
         # Use journal timestamp (most reliable), fall back to heartbeat-state.json, then profile
@@ -947,6 +950,100 @@ def api_pnl():
             except Exception:
                 pass
     return jsonify(rows)
+
+
+# ── API: /api/self-stats ────────────────────────────────────────────────────────
+
+@app.route("/api/self-stats")
+def api_self_stats():
+    """Returns self-assessment stats for a trader: win rate, avg PnL, drawdown, etc.
+
+    Query params: account=stonks|kairos|aldridge
+    """
+    account = request.args.get("account", "").lower().strip()
+    if account not in ("stonks", "kairos", "aldridge"):
+        return jsonify({"error": "account must be stonks, kairos, or aldridge"}), 400
+
+    agent_map = {"stonks": "trader-stonks", "kairos": "trader-kairos", "aldridge": "trader-aldridge"}
+    agent_id = agent_map.get(account, f"trader-{account}")
+
+    result = {
+        "account": account,
+        "agent_id": agent_id,
+        "win_rate": 0, "win_rate_10": 0, "win_rate_50": 0,
+        "avg_pnl": 0, "total_trades": 0, "total_pnl": 0,
+        "max_drawdown": 0, "current_drawdown": 0,
+        "position_count": 0, "concentration_warnings": [],
+        "avg_confidence": 0, "confidence_calibration": 0,
+    }
+
+    with _db() as conn:
+        if conn:
+            try:
+                # Win rate from executed_trades
+                trades = conn.execute(
+                    "SELECT pnl FROM trading.executed_trades "
+                    "WHERE agent_id = %s AND pnl IS NOT NULL "
+                    "ORDER BY entry_time DESC",
+                    (agent_id,)
+                ).fetchall()
+                pnls = [t["pnl"] for t in trades]
+                if pnls:
+                    result["total_trades"] = len(pnls)
+                    result["total_pnl"] = round(sum(pnls), 2)
+                    result["avg_pnl"] = round(sum(pnls) / len(pnls), 2)
+                    wins = sum(1 for p in pnls if p > 0)
+                    result["win_rate"] = round(wins / len(pnls), 4)
+                    result["win_rate_10"] = round(sum(1 for p in pnls[:10] if p > 0) / max(len(pnls[:10]), 1), 4)
+                    result["win_rate_50"] = round(sum(1 for p in pnls[:50] if p > 0) / max(len(pnls[:50]), 1), 4)
+
+                # Drawdown from portfolio_snapshots
+                snapshots = conn.execute(
+                    "SELECT portfolio_value FROM trading.portfolio_snapshots "
+                    "WHERE agent_id = %s AND portfolio_value IS NOT NULL "
+                    "ORDER BY timestamp ASC",
+                    (agent_id,)
+                ).fetchall()
+                values = [s["portfolio_value"] for s in snapshots]
+                if values:
+                    peak = values[0]
+                    max_dd = 0
+                    for v in values:
+                        if v > peak:
+                            peak = v
+                        dd = (peak - v) / peak
+                        if dd > max_dd:
+                            max_dd = dd
+                    result["max_drawdown"] = round(max_dd, 4)
+                    current_dd = (peak - values[-1]) / peak if values[-1] < peak else 0
+                    result["current_drawdown"] = round(current_dd, 4)
+
+                # Position count from Alpaca positions table
+                positions = conn.execute(
+                    "SELECT COUNT(*) as cnt FROM trading.positions WHERE agent_id = %s",
+                    (agent_id,)
+                ).fetchone()
+                result["position_count"] = positions["cnt"] if positions else 0
+
+                # Average confidence from decisions
+                decisions = conn.execute(
+                    "SELECT conviction FROM trading.decisions "
+                    "WHERE trader_id = %s AND conviction IS NOT NULL "
+                    "ORDER BY timestamp DESC LIMIT 100",
+                    (agent_id,)
+                ).fetchall()
+                confs = [d["conviction"] for d in decisions if d["conviction"]]
+                if confs:
+                    result["avg_confidence"] = round(sum(confs) / len(confs), 4)
+                    # Simple calibration: how often high-conviction (>=0.7) trades were wins
+                    high_conf_trades = [p for p in pnls[:len(confs)] if p > 0]
+                    if high_conf_trades:
+                        result["confidence_calibration"] = round(len(high_conf_trades) / len(pnls[:len(confs)]), 4)
+
+            except Exception as e:
+                result["error"] = str(e)
+
+    return jsonify(result)
 
 
 # ── API: /api/journal ─────────────────────────────────────────────────────────
