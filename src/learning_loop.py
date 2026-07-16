@@ -149,7 +149,7 @@ def get_trades(agent_id: str, limit: int = 50) -> List[Dict]:
                 """SELECT agent_id,
                           ticker,
                           action,
-                          quantity,
+                          shares AS quantity,
                           entry_price,
                           exit_price,
                           entry_time AS entry_timestamp,
