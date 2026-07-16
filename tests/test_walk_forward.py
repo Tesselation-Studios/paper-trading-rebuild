@@ -496,3 +496,311 @@ class TestMultiDateIntegration:
         assert len(results) == 1
         assert results[0].trader == "kairos"
         assert results[0].date == "2026-07-05"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Minimum OOS enforcement tests (SPEC: DP-3)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestMinOOSEnforcement:
+    """SPEC requires minimum 5 out-of-sample validation windows."""
+
+    def test_enough_dates_passes(self):
+        """With 20 dates, train=5, val=1 → 15 windows ≥ 5 ✓"""
+        dates = [f"2026-06-{i+1:02d}" for i in range(20)]
+        windows = build_walk_forward_windows(dates, train_days=5, val_days=1)
+        assert len(windows) >= 5, f"Expected ≥5 windows, got {len(windows)}"
+
+    def test_too_few_dates_fails(self):
+        """With 7 dates, train=5, val=1 → 1 window < 5 ✗"""
+        dates = [f"2026-06-{i+1:02d}" for i in range(7)]
+        windows = build_walk_forward_windows(dates, train_days=5, val_days=1)
+        assert len(windows) < 5, f"Expected <5 windows, got {len(windows)}"
+
+    def test_minimum_exactly_5(self):
+        """train=5, val=1, 10 dates → 5 windows = exactly the minimum."""
+        dates = [f"2026-06-{i+1:02d}" for i in range(10)]
+        windows = build_walk_forward_windows(dates, train_days=5, val_days=1)
+        assert len(windows) == 5
+
+    def test_raises_valueerror_when_too_few(self):
+        """_run_multidate_sweep should raise ValueError when < 5 windows."""
+        from src.prompt_sweep import _run_multidate_sweep
+        with pytest.raises(ValueError, match="at least 5 out-of-sample"):
+            _run_multidate_sweep(
+                date_str="2026-07-10",
+                trader_short="test",
+                prompt_text="# Test prompt",
+                n_variants=1,
+                n_dates=8,  # train=5 + val=1 + 2 = 8, but 8-5-1+1=3 windows < 5
+                train_days=5,
+                val_days=1,
+                dry_run=True,
+            )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Statistical significance tests (SPEC: DP-3)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestStatisticalSignificance:
+    """t-test for variant vs baseline significance."""
+
+    def test_clear_improvement_is_significant(self):
+        """Variant clearly better → significant."""
+        from src.prompt_sweep import _ttest_significance
+        variant = [0.6, 0.65, 0.7, 0.68, 0.72]
+        baseline = [0.3, 0.32, 0.28, 0.31, 0.3]
+        is_sig, t_stat, p_val = _ttest_significance(variant, baseline)
+        assert is_sig, f"Expected significant, got t={t_stat:.2f}, p={p_val:.4f}"
+        assert t_stat > 0
+        assert p_val < 0.05
+
+    def test_no_improvement_is_not_significant(self):
+        """Variant same as baseline → not significant."""
+        from src.prompt_sweep import _ttest_significance
+        variant = [0.3, 0.31, 0.29, 0.32, 0.3]
+        baseline = [0.3, 0.32, 0.28, 0.31, 0.3]
+        is_sig, t_stat, p_val = _ttest_significance(variant, baseline)
+        assert not is_sig
+
+    def test_worse_variant_is_not_significant(self):
+        """Variant worse than baseline → not significant."""
+        from src.prompt_sweep import _ttest_significance
+        variant = [0.1, 0.12, 0.08, 0.11, 0.09]
+        baseline = [0.3, 0.32, 0.28, 0.31, 0.3]
+        is_sig, t_stat, p_val = _ttest_significance(variant, baseline)
+        assert not is_sig
+
+    def test_single_sample_returns_not_significant(self):
+        """Not enough data → can't determine significance."""
+        from src.prompt_sweep import _ttest_significance
+        is_sig, t_stat, p_val = _ttest_significance([0.5], [0.3])
+        assert not is_sig
+        assert p_val == 1.0
+
+    def test_high_variance_reduces_significance(self):
+        """High variance should make it harder to reach significance."""
+        from src.prompt_sweep import _ttest_significance
+        # Low variance → should be significant
+        variant_low = [0.6, 0.61, 0.59, 0.6, 0.62]
+        baseline_low = [0.3, 0.31, 0.29, 0.3, 0.32]
+        is_sig_low, _, p_low = _ttest_significance(variant_low, baseline_low)
+
+        # High variance → may not be significant
+        variant_high = [0.9, 0.1, 0.8, 0.2, 0.7]
+        baseline_high = [0.3, 0.2, 0.5, 0.1, 0.4]
+        is_sig_high, _, p_high = _ttest_significance(variant_high, baseline_high)
+
+        # Low-variance case should have lower p-value
+        assert p_low < p_high or not is_sig_high
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Sharpe gate tests (SPEC: DP-3, specs/validation.md)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestSharpeGates:
+    """SPEC-mandated Sharpe ratio acceptance criteria."""
+
+    def test_all_gates_pass(self):
+        """Good val Sharpe, better than baseline and training → all pass."""
+        from src.prompt_sweep import _compute_sharpe_gates
+        val_sharpes = [1.5, 1.6, 1.4, 1.7, 1.55]
+        train_sharpes = [2.0, 1.9, 2.1, 1.8, 2.0]
+        baseline_val_sharpes = [0.8, 0.9, 0.7, 0.85, 0.9]
+        passed, diag = _compute_sharpe_gates(val_sharpes, train_sharpes, baseline_val_sharpes)
+        assert passed
+        assert diag["gate_1_positive"]  # val > 0
+        assert diag["gate_2_vs_baseline"]  # val > baseline
+        assert diag["gate_3_not_overfit"]  # val > train × 0.7
+
+    def test_negative_sharpe_fails(self):
+        """Negative validation Sharpe → fails gate 1."""
+        from src.prompt_sweep import _compute_sharpe_gates
+        val_sharpes = [-0.5, -0.3, -0.4]
+        train_sharpes = [1.0, 1.1, 0.9]
+        baseline_val_sharpes = [0.5, 0.4, 0.6]
+        passed, diag = _compute_sharpe_gates(val_sharpes, train_sharpes, baseline_val_sharpes)
+        assert not passed
+        assert not diag["gate_1_positive"]
+
+    def test_worse_than_baseline_fails(self):
+        """Worse Sharpe than baseline → fails gate 2."""
+        from src.prompt_sweep import _compute_sharpe_gates
+        val_sharpes = [0.5, 0.6, 0.4]
+        train_sharpes = [1.0, 1.1, 0.9]
+        baseline_val_sharpes = [1.2, 1.3, 1.1]  # baseline is better
+        passed, diag = _compute_sharpe_gates(val_sharpes, train_sharpes, baseline_val_sharpes)
+        assert not passed
+        assert not diag["gate_2_vs_baseline"]
+
+    def test_overfit_detected(self):
+        """High train Sharpe, low val Sharpe → overfit, fails gate 3."""
+        from src.prompt_sweep import _compute_sharpe_gates
+        val_sharpes = [0.3, 0.4, 0.35]  # mediocre val
+        train_sharpes = [3.0, 3.2, 2.8]  # great train → overfit
+        baseline_val_sharpes = [0.2, 0.3, 0.25]
+        passed, diag = _compute_sharpe_gates(val_sharpes, train_sharpes, baseline_val_sharpes)
+        # val_sharpe (0.35) < train_sharpe (3.0) × 0.7 = 2.1 → NOT overfit actually?
+        # Wait: 0.35 < 2.1, so it IS below train × 0.7 → fails gate 3
+        assert not passed
+        assert not diag["gate_3_not_overfit"]
+
+    def test_not_overfit_passes(self):
+        """Val Sharpe close to train Sharpe → not overfit."""
+        from src.prompt_sweep import _compute_sharpe_gates
+        val_sharpes = [1.4, 1.5, 1.45]
+        train_sharpes = [1.6, 1.7, 1.55]
+        baseline_val_sharpes = [0.8, 0.9, 0.85]
+        passed, diag = _compute_sharpe_gates(val_sharpes, train_sharpes, baseline_val_sharpes)
+        # val (1.45) > train (1.62) × 0.7 = 1.13 → passes
+        assert passed
+        assert diag["gate_1_positive"]
+        assert diag["gate_2_vs_baseline"]
+        assert diag["gate_3_not_overfit"]
+
+    def test_empty_sharpes_fails(self):
+        """Empty input → fails."""
+        from src.prompt_sweep import _compute_sharpe_gates
+        passed, diag = _compute_sharpe_gates([], [], [])
+        assert not passed
+        assert diag.get("reason") == "no validation data"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Parameter freeze tests (SPEC: DP-3)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestParamFreeze:
+    """Parameter freeze mechanism — 5 trading day lock after promotion."""
+
+    def test_no_freeze_file_returns_not_frozen(self):
+        """No freeze file → not frozen."""
+        from src.prompt_sweep import _FREEZE_PATH, _check_param_freeze
+        # Ensure no freeze file exists
+        if _FREEZE_PATH.exists():
+            _FREEZE_PATH.unlink()
+        is_frozen, reason = _check_param_freeze("kairos")
+        assert not is_frozen
+        assert reason is None
+
+    def test_future_freeze_is_frozen(self):
+        """Freeze with future date → frozen."""
+        from src.prompt_sweep import _FREEZE_PATH, _check_param_freeze
+        import json
+        from datetime import datetime, timedelta
+
+        future = (datetime.now() + timedelta(days=10)).isoformat()
+        data = {
+            "kairos": {
+                "variant": "test_variant",
+                "promoted_at": datetime.now().isoformat(),
+                "frozen_until": future,
+                "freeze_trading_days": 5,
+            }
+        }
+        _FREEZE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _FREEZE_PATH.write_text(json.dumps(data))
+
+        is_frozen, reason = _check_param_freeze("kairos")
+        assert is_frozen
+        assert "frozen until" in (reason or "")
+
+        # Cleanup
+        _FREEZE_PATH.unlink()
+
+    def test_past_freeze_is_not_frozen(self):
+        """Freeze with past date → no longer frozen."""
+        from src.prompt_sweep import _FREEZE_PATH, _check_param_freeze
+        import json
+        from datetime import datetime, timedelta
+
+        past = (datetime.now() - timedelta(days=10)).isoformat()
+        data = {
+            "kairos": {
+                "variant": "test_variant",
+                "promoted_at": (datetime.now() - timedelta(days=15)).isoformat(),
+                "frozen_until": past,
+                "freeze_trading_days": 5,
+            }
+        }
+        _FREEZE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _FREEZE_PATH.write_text(json.dumps(data))
+
+        is_frozen, reason = _check_param_freeze("kairos")
+        assert not is_frozen
+
+        # Cleanup
+        _FREEZE_PATH.unlink()
+
+    def test_record_freeze_creates_file(self):
+        """_record_param_freeze should create the freeze file."""
+        from src.prompt_sweep import _FREEZE_PATH, _record_param_freeze, _check_param_freeze
+        import json
+
+        # Clean start
+        if _FREEZE_PATH.exists():
+            _FREEZE_PATH.unlink()
+
+        _record_param_freeze("kairos", "momentum_focus", freeze_trading_days=5)
+
+        assert _FREEZE_PATH.exists()
+        data = json.loads(_FREEZE_PATH.read_text())
+        assert "kairos" in data
+        assert data["kairos"]["variant"] == "momentum_focus"
+        assert data["kairos"]["freeze_trading_days"] == 5
+
+        is_frozen, _ = _check_param_freeze("kairos")
+        assert is_frozen
+
+        # Cleanup
+        _FREEZE_PATH.unlink()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Overfit detection integration tests (SPEC: DP-3)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestOverfitDetection:
+    """End-to-end: walk-forward should reject overfit variants."""
+
+    def test_overfit_strategy_fails_sharpe_gate(self):
+        """A strategy that crushes training but flops validation should fail."""
+        from src.prompt_sweep import _compute_sharpe_gates
+
+        # Simulate an overfit strategy: great on training, terrible on validation
+        val_sharpes = [-0.2, 0.1, -0.3, 0.2, 0.0]  # barely positive, highly variable
+        train_sharpes = [3.5, 3.2, 3.8, 3.1, 3.6]  # amazing training → overfit
+        baseline_val_sharpes = [0.5, 0.6, 0.4, 0.55, 0.5]
+
+        passed, diag = _compute_sharpe_gates(val_sharpes, train_sharpes, baseline_val_sharpes)
+        # Should fail: val (0.0 avg) < baseline (0.51 avg) → fails gate 2
+        # AND val (0.0) < train (3.44) × 0.7 = 2.41 → fails gate 3
+        assert not passed
+
+    def test_robust_strategy_passes_all_gates(self):
+        """A strategy with consistent train+val performance should pass."""
+        from src.prompt_sweep import _compute_sharpe_gates
+
+        val_sharpes = [1.2, 1.3, 1.1, 1.4, 1.25]
+        train_sharpes = [1.5, 1.4, 1.6, 1.3, 1.55]
+        baseline_val_sharpes = [0.6, 0.65, 0.55, 0.7, 0.6]
+
+        passed, diag = _compute_sharpe_gates(val_sharpes, train_sharpes, baseline_val_sharpes)
+        # val (1.25) > 0 ✓, > baseline (0.62) ✓, > train (1.47) × 0.7 = 1.03 ✓
+        assert passed, f"Expected all gates to pass, got {diag}"
+
+    def test_overfit_also_fails_ttest(self):
+        """Overfit variant with high variance should fail t-test too."""
+        from src.prompt_sweep import _ttest_significance
+
+        # Simulate overfit: wildly inconsistent across windows
+        variant = [5.0, -3.0, 4.0, -2.0, 1.0]  # high variance
+        baseline = [1.5, 1.6, 1.4, 1.5, 1.6]  # consistent
+
+        is_sig, t_stat, p_val = _ttest_significance(variant, baseline)
+        # High variance + mean not much different → not significant
+        assert not is_sig, (
+            f"Overfit should NOT be significant, got t={t_stat:.2f}, p={p_val:.4f}"
+        )
