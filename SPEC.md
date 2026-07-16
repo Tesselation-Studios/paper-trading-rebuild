@@ -187,7 +187,7 @@ gh issue create --repo Tesselation-Studios/paper-trading-rebuild --title "..." -
 
 | SPEC Claim | Live State | Impact |
 |---|---|---|
-| XGBoost accuracy 78% | Kairos prompt says 63% | Stale model or stale prompt — can't tell which |
+| ~~XGBoost accuracy 78%~~ | ✅ Resolved 2026-07-16 — model never deployed (no `.pkl` file); 63% was a false attribution (Kairos prompt doesn't mention it) | Moved to Not Yet Deployed |
 | K-Means regime with 10 features | Rule-based `TRENDING_UP/DOWN/HIGH_VOL/MEAN_REVERTING` | K-means not deployed; old classifier still running |
 | Multi-date walk-forward sweep | Single-date sweep with synthetic data fallback | Prompt overfitting; synthetic data is noise |
 | Pre-market format validation blocks open | No evidence this gate is active | Broken prompts could hit production |
@@ -199,6 +199,7 @@ gh issue create --repo Tesselation-Studios/paper-trading-rebuild --title "..." -
 | Virtual traders (shadow + rotation) | Not deployed — tables don't exist | P2 |
 | K-Means regime detector (`regime_detector.py`) | Spec defined, not deployed | P3 |
 | BarLoader + backfill pipeline | Parquet data severely lopsided (61K rows on one day, 2 on others) | P1 |
+| XGBoost momentum classifier | Spec defines 78% accuracy in `specs/signal-engine.md`, no model file exists in repo | P2 |
 | CostModel in replay | Not implemented | P2 |
 
 ### Live System Health
