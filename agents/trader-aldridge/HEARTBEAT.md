@@ -1,16 +1,39 @@
-# Aldridge Heartbeat
+# Aldridge Heartbeat — Persistent Session
 
-Read `skills/skill-aldridge-strategy/SKILL.md` for full strategy rules.
+This is a **persistent session**, not a cron job. You run continuously during market hours (9:30 AM - 4:00 PM ET).
 
-**Core flow:**
-0. Check inbox — `curl -s "http://localhost:8080/inbox?agent=aldridge"` — respond to any pending Hermes messages
-1. Portfolio check — `python3 src/skill_portfolio.py --account aldridge`
-2. Macro scan — briefing, macro data, interest rates
-3. **Stock discovery** — scan undervalued sectors and beaten-down quality names. Check fundamentals (`GET /fundamentals`), insiders (`GET /insiders`), news (`GET /news` or `GET /news-cache`), and macro rotations. Propose at least 1 new value candidate. Log discovery to `strategy_notes/<DATE>_discovery.md`.
-4. Thesis integrity — news, fundamentals, insiders for each position
-5. Journal a note on conviction and thesis status
-6. Learning loop — `python3 -m src.learning_loop --agent trader-aldridge`. Read the report. If param tweaks were applied, adjust your strategy accordingly. Pay attention to the **binding constraint** — focus improvement there.
-7. Update profile
-8. `python3 src/heartbeat_timestamp.py aldridge`
+## Two-Cycle Architecture
 
-Output HEARTBEAT_OK when done.
+### Cycle 1: Trading Tick (every 5 min)
+1. Read tick context (pre-assembled data from tick_prompt.py)
+2. Screen for value: oversold names, low P/E, price near support, insider buying
+3. Apply Investment Committee questions before every decision
+4. Decide BUY/SELL/HOLD
+5. Output JSON decision block
+6. Journal
+
+### Cycle 2: Heartbeat (every 30 min)
+After every 6th tick, run the heartbeat maintenance loop:
+
+1. **Reflect** — Review last 6 journal entries. Thesis integrity check.
+2. **Distill** — Update MEMORY.md with new insights. Prune stale entries.
+3. **Prune** — Trim prompt.txt if it grew beyond 2,500 chars. Move verbose sections to skills/.
+4. **Consider new positions** — Check fundamentals for new value opportunities.
+5. **Portfolio check** — `python3 src/skill_portfolio.py --account aldridge`
+6. **Stop-loss check** — `python3 src/skill_stop_check.py --account aldridge`
+7. **Fundamentals scan** — Check for new value names, re-check existing positions
+8. **Learning loop** — `python3 -m src.learning_loop --agent trader-aldridge`
+9. **HEARTBEAT_OK** — Signal completion
+
+## Between Cycles
+- Sleep 60 seconds between ticks
+- If no trades for 30 min, verify data bus connectivity
+- If market closed, idle until next open
+
+## Self-Improvement Rules
+- If prompt.txt is stale (old dates, dead tickers): **edit it yourself**
+- If MEMORY.md is bloated: **prune it**
+- If a skill is missing or outdated: **create or update it**
+- If you discover a new working pattern: **add it to MEMORY.md**
+
+Output HEARTBEAT_OK after each heartbeat cycle.
