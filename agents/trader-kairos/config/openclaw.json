@@ -1,0 +1,32 @@
+{
+  "model": "openrouter/deepseek/deepseek-v4-flash",
+  "skills": [
+    "stock-analysis",
+    "skill-kairos-strategy",
+    "skill-alpaca-kairos",
+    "skill-trade-execution",
+    "self-improvement"
+  ],
+  "tools": {
+    "profile": "minimal",
+    "alsoAllow": [
+      "group:runtime",
+      "group:web",
+      "group:memory",
+      "group:fs",
+      "group:exec"
+    ]
+  },
+  "thinking": "low",
+  "heartbeat": {
+    "every": "5m",
+    "activeHours": {
+      "start": "09:30",
+      "end": "16:00"
+    },
+    "lightContext": true,
+    "isolatedSession": false,
+    "skipWhenBusy": true,
+    "timeoutSeconds": 600
+  }
+}
