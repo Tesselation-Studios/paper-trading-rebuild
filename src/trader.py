@@ -78,6 +78,7 @@ class TraderState:
     journal: List[TraderJournal] = field(default_factory=list)
     equity_history: List[float] = field(default_factory=list)
     return_history: List[float] = field(default_factory=list)
+    last_trade_tick: Dict[str, int] = field(default_factory=dict)  # ticker → tick_number cooldown
 
     @property
     def win_rate(self) -> float:
@@ -129,12 +130,18 @@ class Trader:
         params: Optional[SignalParams] = None,
         initial_balance: float = 100_000.0,
         max_journal_entries: int = 100,
+        min_conviction: float = 0.3,
+        ticker_cooldown_ticks: int = 0,
+        max_positions: int = 99,
     ):
         self.trader_id = trader_id
         self.signal_engine = SignalEngine(params=params)
         self.breaker = CircuitBreaker(trader_id)
         self.governor = ChangeGovernor(trader_id)
         self.max_journal_entries = max_journal_entries
+        self.min_conviction = min_conviction
+        self.ticker_cooldown_ticks = ticker_cooldown_ticks
+        self.max_positions = max_positions
 
         # Agent tool-loop circuit breaker — prevents runaway tool calls
         self.agent_breaker = get_breaker(trader_id)
@@ -484,23 +491,45 @@ class Trader:
     def _default_decider(
         self, tick: Any, signal: SignalReport
     ) -> Optional[TraderDecision]:
-        """Default rule-based decider. Replace with LLM agent or virtual trader variant.
+        """Default rule-based decider with trader-specific conviction threshold.
 
-        Simple rules:
-          - Composite > 0.3 AND conviction > 0.3 → BUY
+        Configurable per trader:
+          - min_conviction: Minimum conviction to enter (default 0.3).
+          - ticker_cooldown_ticks: Min ticks between same-ticker trades.
+          - max_positions: Max open positions (portfolio-level cap).
+
+        Rules:
+          - Conviction < min_conviction → HOLD
+          - Composite > 0.3 AND no position AND under max_positions → BUY
           - Composite < -0.3 AND have position → SELL
           - Otherwise → HOLD
         """
         ticker = tick.ticker
         has_position = ticker in self.state.positions
+        min_conv = self.min_conviction
 
-        if signal.conviction < 0.3:
+        if signal.conviction < min_conv:
             return TraderDecision(
                 ticker=ticker, decision="HOLD", conviction=signal.conviction,
-                rationale=f"Conviction too low ({signal.conviction:.2f})",
+                rationale=f"Conviction too low ({signal.conviction:.2f} < {min_conv:.2f})",
             )
 
+        # Cooldown: prevent same-ticker re-entry within cooldown window
+        if self.ticker_cooldown_ticks > 0 and ticker in self.state.last_trade_tick:
+            ticks_since = self.state.ticks_processed - self.state.last_trade_tick[ticker]
+            if ticks_since < self.ticker_cooldown_ticks:
+                return TraderDecision(
+                    ticker=ticker, decision="HOLD", conviction=signal.conviction,
+                    rationale=f"Cooldown: {ticks_since}/{self.ticker_cooldown_ticks} ticks since last {ticker} trade",
+                )
+
         if signal.composite_signal > 0.3 and not has_position:
+            # Max positions cap: prevent overtrading
+            if len(self.state.positions) >= self.max_positions:
+                return TraderDecision(
+                    ticker=ticker, decision="HOLD", conviction=signal.conviction,
+                    rationale=f"Max positions ({self.max_positions}) reached, {len(self.state.positions)} open",
+                )
             return TraderDecision(
                 ticker=ticker, decision="BUY", conviction=signal.conviction,
                 rationale=f"Bullish signal ({signal.composite_signal:.2f}), regime={signal.regime}",
@@ -566,6 +595,9 @@ class Trader:
                 # Register with stop-loss manager
                 self.stop_loss.set_entry(ticker, price)
 
+            # Record cooldown tick for this ticker
+            self.state.last_trade_tick[ticker] = self.state.ticks_processed
+
         elif decision.decision == "SELL":
             if ticker not in self.state.positions:
                 return
@@ -590,6 +622,9 @@ class Trader:
                 self.stop_loss.record_exit(ticker)
             else:
                 pos["shares"] -= shares
+
+            # Record cooldown tick for this ticker after selling
+            self.state.last_trade_tick[ticker] = self.state.ticks_processed
 
         # Update equity
         self._update_equity()
@@ -715,10 +750,12 @@ def create_trader(
     params = SignalParams()
 
     # Trader-specific defaults (conservative starting points)
+    trader_kwargs = {}
     if trader_id == "kairos":
-        # Momentum trader — higher momentum sensitivity
+        # Momentum trader — higher conviction, fewer positions, cooldown to prevent overtrading
         params.set("momentum_threshold", 0.50)
         params.set("base_size_pct", 0.18)
+        trader_kwargs = {"min_conviction": 0.45, "ticker_cooldown_ticks": 6, "max_positions": 3}
     elif trader_id == "aldridge":
         # Value trader — more positions, smaller sizes
         params.set("base_size_pct", 0.12)
@@ -734,7 +771,7 @@ def create_trader(
         for name, value in params_override.items():
             params.set(name, value)
 
-    return Trader(trader_id=trader_id, params=params, initial_balance=initial_balance)
+    return Trader(trader_id=trader_id, params=params, initial_balance=initial_balance, **trader_kwargs)
 
 
 def create_fleet(
