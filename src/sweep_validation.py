@@ -503,6 +503,9 @@ def run_phase1_signal_sweep(
         baseline_val_scores, baseline_val_scores
     )
 
+    # Import statistical significance gate
+    from src.validation import is_significant as _is_sig
+
     for v in variants:
         passes_win_rate = v.win_rate >= 0.6
         passes_avg = v.avg_val_score > baseline_metrics["avg_val_score"] + 0.05
@@ -510,7 +513,14 @@ def run_phase1_signal_sweep(
             baseline_metrics["val_stability"] == 0.0
             or v.val_stability < 2.0 * baseline_metrics["val_stability"]
         )
-        if passes_win_rate and passes_avg and passes_stability:
+        # Gate 4: Statistical significance (SPEC §6.1)
+        passes_sig = True
+        if len(v.val_scores) >= 5 and len(baseline_val_scores) >= 5:
+            passes_sig, _ = _is_sig(
+                baseline_val_scores, v.val_scores, p_threshold=0.05
+            )
+
+        if passes_win_rate and passes_avg and passes_stability and passes_sig:
             phase1_winner = v
             break
 
