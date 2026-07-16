@@ -198,7 +198,7 @@ gh issue create --repo Tesselation-Studios/paper-trading-rebuild --title "..." -
 |---|---|---|
 | Virtual traders (shadow + rotation) | Not deployed — tables don't exist | P2 |
 | K-Means regime detector (`regime_detector.py`) | Spec defined, not deployed | P3 |
-| BarLoader + backfill pipeline | Parquet data severely lopsided (61K rows on one day, 2 on others) | P1 |
+| BarLoader + backfill pipeline | ✅ FIXED: smarter date-range fetch + data distribution validator + balance flag | P1 |
 | CostModel in replay | Not implemented | P2 |
 
 ### Live System Health
@@ -209,9 +209,9 @@ gh issue create --repo Tesselation-Studios/paper-trading-rebuild --title "..." -
 | **Aldridge** | — | 50% | **75%** | 🔴 Should be knocked out |
 | **Stonks** | $0 | 0% | 13.2% | 🔴 Not trading at all |
 
-### ⚠️ Active Risk: Prompt Bloat
+### ✅ Prompt Bloat Risk — Mitigated (#175)
 
-Nightly synthesis is appended into AGENTS.md (~80 lines/night). Current files are ~10K chars — approaching OpenClaw's 12K hard limit. Mid-file instructions will silently be truncated. Synthesis MUST be moved to a separate file or DB.
+Nightly synthesis writes to `reports/` directory, NOT AGENTS.md. CI enforces size limits via `scripts/check_agent_file_sizes.py —ci —all`. `promote_virtual_to_live.py` blocks promotion if AGENTS.md exceeds 8K chars. All files currently under 8K.
 
 ### Action Items from Fusion Router
 

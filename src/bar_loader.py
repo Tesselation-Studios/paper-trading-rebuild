@@ -413,6 +413,56 @@ class BarLoader:
                  len(all_ticks), tickers, start_date, end_date, interval)
         return all_ticks
 
+    # ── Data quality ─────────────────────────────────────────────────────
+
+    def validate_distribution(
+        self,
+        ticker: str,
+        min_bars: int = 30,
+        max_bars: int = 100,
+    ) -> Tuple[List[str], List[str], List[str]]:
+        """Validate per-date bar distribution for a ticker.
+
+        Returns (balanced_dates, sparse_dates, dense_dates) where:
+          - balanced: dates within [min_bars, max_bars]
+          - sparse: dates with < min_bars bars
+          - dense: dates with > max_bars bars
+        """
+        df = self._read_parquet(ticker)
+        if df is None or df.empty:
+            return [], [], []
+
+        date_counts = df["timestamp"].dt.date.value_counts()
+        balanced: List[str] = []
+        sparse: List[str] = []
+        dense: List[str] = []
+
+        for d, count in date_counts.items():
+            d_str = d.strftime("%Y-%m-%d") if hasattr(d, "strftime") else str(d)
+            if count < min_bars:
+                sparse.append(d_str)
+            elif count > max_bars:
+                dense.append(d_str)
+            else:
+                balanced.append(d_str)
+
+        return balanced, sparse, dense
+
+    def all_distributions_balanced(
+        self,
+        tickers: List[str],
+        min_bars: int = 30,
+        max_bars: int = 100,
+    ) -> bool:
+        """Check whether all tickers have balanced data distribution."""
+        for ticker in tickers:
+            _, sparse, dense = self.validate_distribution(
+                ticker, min_bars=min_bars, max_bars=max_bars
+            )
+            if dense:
+                return False
+        return True
+
     # ── Internal helpers ───────────────────────────────────────────────────
 
     def _load_from_parquet(

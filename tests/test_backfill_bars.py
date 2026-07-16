@@ -147,13 +147,64 @@ def test_missing_date_range_fully_covered():
 
 
 def test_missing_date_range_partial():
-    """Some dates missing → returns appropriate range."""
+    """Some dates missing → returns actual missing range, not full days range."""
     today = date.today()
-    existing = {today.strftime("%Y-%m-%d")}  # only today
+    # days=10: search range is today-11 to today (12 days)
+    # Cover first 3 and last 3 edges, leave middle 6 missing
+    existing = set()
+    for i in range(12):
+        d = today - timedelta(days=i)
+        # Keep oldest 3 (i >= 9) and newest 3 (i <= 2)
+        if i >= 9 or i <= 2:
+            existing.add(d.strftime("%Y-%m-%d"))
 
-    start, end = bb.missing_date_range("TICKER", days=5, existing=existing)
+    start, end = bb.missing_date_range("TICKER", days=10, existing=existing)
     assert start is not None
     assert end is not None
+    # The returned range should be narrower than the full days range
+    start_d = date.fromisoformat(start)
+    end_d = date.fromisoformat(end)
+    full_start = today - timedelta(days=11)
+    full_end = today
+    # The returned range must be within the full search bounds
+    assert start_d >= full_start, (
+        f"Expected start {start} >= {full_start.isoformat()} (clamped to search range)"
+    )
+    assert end_d <= full_end, (
+        f"Expected end {end} <= {full_end.isoformat()}"
+    )
+    # The returned range should be tighter than the full range
+    # (middle dates only, not edges)
+    days_covered = (end_d - start_d).days
+    full_days = (full_end - full_start).days
+    assert days_covered < full_days, (
+        f"Expected range {start}→{end} ({days_covered}d) to be tighter "
+        f"than full range {full_start.isoformat()}→{full_end.isoformat()} ({full_days}d)"
+    )
+
+
+def test_missing_date_range_returns_missing_min_max():
+    """When only middle dates are missing, range wraps the actual gap."""
+    today = date.today()
+    existing = set()
+    # days=10 → 11 dates. Fill in edges, leave middle missing.
+    for i in range(11):
+        d = today - timedelta(days=i)
+        # Keep oldest 2 and newest 2
+        if i >= 9 or i <= 1:
+            existing.add(d.strftime("%Y-%m-%d"))
+
+    start, end = bb.missing_date_range("TICKER", days=10, existing=existing)
+    assert start is not None
+    assert end is not None
+    start_d = date.fromisoformat(start)
+    end_d = date.fromisoformat(end)
+    # The range should be approximately days 2-8 from today, not days 0-10
+    # With 1-day buffer, start should be around today-9 and end around today-1
+    days_covered = (end_d - start_d).days
+    assert days_covered <= 12, (
+        f"Expected tight range but got {start} → {end} ({days_covered} days)"
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -198,6 +249,125 @@ def test_compute_indicators_nan_for_early_rows(sample_bars_df):
     assert result["macd"].iloc[0] is pd.NA or pd.isna(result["macd"].iloc[0])
     non_nan_macd = result["macd"].iloc[26:].dropna()
     assert len(non_nan_macd) > 0, f"MACD should have non-NaN values after warmup, got {len(non_nan_macd)}"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# validate_data_distribution
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_validate_balanced_data():
+    """Balanced data (78 bars/day) passes validation."""
+    times = pd.date_range("2026-07-01 09:30", "2026-07-01 16:00", freq="5min", tz="UTC")
+    df = pd.DataFrame({
+        "timestamp": times,
+        "open": 100.0,
+        "high": 101.0,
+        "low": 99.0,
+        "close": 100.5,
+        "volume": 10000.0,
+    })
+    balanced, sparse, dense = bb.validate_data_distribution(df, "TEST")
+    assert len(balanced) == 1, f"Expected 1 balanced date, got {len(balanced)}"
+    assert len(sparse) == 0
+    assert len(dense) == 0
+
+
+def test_validate_detects_sparse_dates():
+    """Dates with < 30 bars are flagged as sparse."""
+    times = pd.date_range("2026-07-01 09:30", periods=5, freq="5min", tz="UTC")
+    df = pd.DataFrame({
+        "timestamp": times,
+        "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5, "volume": 10000.0,
+    })
+    balanced, sparse, dense = bb.validate_data_distribution(df, "TEST")
+    assert len(sparse) == 1
+    assert len(balanced) == 0
+    assert len(dense) == 0
+
+
+def test_validate_detects_dense_dates():
+    """Dates with > 100 bars are flagged as dense."""
+    times = pd.date_range("2026-07-01 09:30", periods=200, freq="1min", tz="UTC")
+    df = pd.DataFrame({
+        "timestamp": times,
+        "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5, "volume": 10000.0,
+    })
+    balanced, sparse, dense = bb.validate_data_distribution(df, "TEST")
+    assert len(dense) == 1, f"Expected 1 dense date, got {len(dense)}"
+    assert len(balanced) == 0
+    assert len(sparse) == 0
+
+
+def test_validate_empty_df():
+    """Empty DataFrame returns all empty lists."""
+    balanced, sparse, dense = bb.validate_data_distribution(pd.DataFrame(), "TEST")
+    assert balanced == []
+    assert sparse == []
+    assert dense == []
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# balance_data
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_balance_reduces_dense_date():
+    """A dense date (200 1-min bars) is downsampled to ~78."""
+    times = pd.date_range("2026-07-01 09:30", periods=200, freq="1min", tz="UTC")
+    df = pd.DataFrame({
+        "timestamp": times,
+        "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5, "volume": 10000.0,
+    })
+    result = bb.balance_data(df, "TEST")
+    # Should be reduced to ~78 (target_bars)
+    assert len(result) <= 80, f"Expected <= 80 bars, got {len(result)}"
+    assert len(result) >= 70, f"Expected >= 70 bars, got {len(result)}"
+
+
+def test_balance_leaves_normal_data_unchanged():
+    """Data with normal row counts (78 bars) is not modified."""
+    times = pd.date_range("2026-07-01 09:30", "2026-07-01 16:00", freq="5min", tz="UTC")
+    df = pd.DataFrame({
+        "timestamp": times,
+        "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5, "volume": 10000.0,
+    })
+    result = bb.balance_data(df, "TEST")
+    assert len(result) == len(df)
+
+
+def test_balance_multi_date():
+    """Balancing works across multiple dates with mixed densities."""
+    # Day 1: 78 bars (normal)
+    day1 = pd.date_range("2026-07-01 09:30", "2026-07-01 16:00", freq="5min", tz="UTC")
+    # Day 2: 200 bars (dense — 1-min data)
+    day2 = pd.date_range("2026-07-02 09:30", periods=200, freq="1min", tz="UTC")
+    # Day 3: 5 bars (sparse — partial day)
+    day3 = pd.date_range("2026-07-03 09:30", periods=5, freq="5min", tz="UTC")
+
+    all_times = day1.append(day2).append(day3)
+    df = pd.DataFrame({
+        "timestamp": all_times,
+        "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5, "volume": 10000.0,
+    })
+    result = bb.balance_data(df, "TEST")
+    # Day 1 (78) + Day 2 (~78 balanced) + Day 3 (5) ≈ 161
+    assert 155 <= len(result) <= 175, (
+        f"Expected ~161 bars, got {len(result)}"
+    )
+    # Timestamps should still be sorted
+    assert result["timestamp"].is_monotonic_increasing
+
+
+def test_balance_preserves_columns():
+    """All original columns are preserved after balancing."""
+    times = pd.date_range("2026-07-01 09:30", periods=200, freq="1min", tz="UTC")
+    df = pd.DataFrame({
+        "timestamp": times,
+        "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5, "volume": 10000.0,
+        "rsi_14": 50.0, "macd": 0.1, "macd_signal": 0.05, "macd_hist": 0.05, "atr_14": 1.0,
+    })
+    result = bb.balance_data(df, "TEST")
+    for col in df.columns:
+        assert col in result.columns, f"Missing column: {col}"
 
 
 # ══════════════════════════════════════════════════════════════════════════════

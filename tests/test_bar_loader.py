@@ -324,6 +324,39 @@ class TestSqliteCache:
             assert ct.volume == pt.volume
 
 
+# ── Tests: validate_distribution ─────────────────────────────────────────────
+
+
+class TestValidateDistribution:
+    def test_balanced_data_passes(self, loader):
+        """AAPL sample data (1 day, market hours only) should be balanced."""
+        # SPY fixture spans across non-market hours (24h range),
+        # so it has >100 bars per date. Use AAPL which is single-day.
+        balanced, sparse, dense = loader.validate_distribution("AAPL")
+        # AAPL fixture: 1 day (July 1 only) of 5-min bars, 9:30-16:00 = ~78
+        # With the standard range, this should be balanced
+        assert len(balanced) == 1, f"Expected 1 balanced date for AAPL, got {len(balanced)}: balanced={balanced}, sparse={sparse}, dense={dense}"
+        assert len(sparse) == 0
+        assert len(dense) == 0
+
+    def test_nonexistent_ticker(self, loader):
+        """Nonexistent ticker returns empty lists."""
+        balanced, sparse, dense = loader.validate_distribution("NONEXIST")
+        assert balanced == []
+        assert sparse == []
+        assert dense == []
+
+    def test_all_distributions_balanced(self, loader):
+        """AAPL alone should be balanced."""
+        # SPY fixture spans non-market hours, so not balanced.
+        # AAPL is single-day market-hours-only.
+        assert loader.all_distributions_balanced(["AAPL"])
+
+    def test_all_distributions_balanced_with_missing(self, loader):
+        """Returns True when only valid data exists (NONEXIST has no dense dates)."""
+        assert loader.all_distributions_balanced(["AAPL", "NONEXIST"])
+
+
 # ── Integration: verify with real data ───────────────────────────────────────
 
 

@@ -113,9 +113,11 @@ def missing_date_range(
     days: int,
     existing: Optional[Set[str]] = None,
 ) -> Tuple[Optional[str], Optional[str]]:
-    """Determine the start/end date range for fetching.
+    """Determine the actual start/end date range for fetching.
 
-    Returns (start_str, end_str) or (None, None) if fully covered.
+    Returns the min/max of the actual missing dates (not the full days range),
+    or (None, None) if fully covered. This avoids downloading the entire
+    date range when only a few dates are missing, preventing lopsided data.
     """
     if existing is None:
         existing = existing_dates(ticker)
@@ -135,7 +137,16 @@ def missing_date_range(
     if not missing:
         return None, None
 
-    return start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")
+    # Return the actual min/max of missing dates, plus a 1-day buffer
+    # on each side to ensure indicator warmup coverage
+    missing_dates = sorted(missing)
+    min_missing = date.fromisoformat(missing_dates[0])
+    max_missing = date.fromisoformat(missing_dates[-1])
+    # Add 1-day buffer for indicator warmup (RSI needs 14 periods),
+    # but don't extend beyond the original search range
+    fetch_start = max(start_date, min_missing - timedelta(days=1))
+    fetch_end = min(end_date, max_missing + timedelta(days=1))
+    return fetch_start.strftime("%Y-%m-%d"), fetch_end.strftime("%Y-%m-%d")
 
 
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -259,6 +270,84 @@ def fetch_bars(ticker: str, start: str, end: str) -> Optional[pd.DataFrame]:
         return None
 
 
+# ── Expected bars per day for 5-minute interval (6.5h trading day) ──────────
+_EXPECTED_BARS_PER_DAY = 78  # 6.5 hours * (60/5) = 78 bars
+_BARS_PER_DAY_MIN = 30       # half-days, holidays
+_BARS_PER_DAY_MAX = 100      # generous upper bound for 5-min data
+
+
+def validate_data_distribution(
+    df: pd.DataFrame,
+    ticker: str = "?",
+    min_bars: int = _BARS_PER_DAY_MIN,
+    max_bars: int = _BARS_PER_DAY_MAX,
+) -> Tuple[List[str], List[str], List[str]]:
+    """Validate per-date bar distribution.
+
+    Returns (balanced_dates, sparse_dates, dense_dates) where:
+      - balanced: dates within [min_bars, max_bars]
+      - sparse: dates with < min_bars bars
+      - dense: dates with > max_bars bars
+    """
+    if df is None or df.empty:
+        return [], [], []
+
+    date_counts = df["timestamp"].dt.date.value_counts()
+    balanced: List[str] = []
+    sparse: List[str] = []
+    dense: List[str] = []
+
+    for d, count in date_counts.items():
+        d_str = d.strftime("%Y-%m-%d") if hasattr(d, "strftime") else str(d)
+        if count < min_bars:
+            sparse.append(d_str)
+        elif count > max_bars:
+            dense.append(d_str)
+        else:
+            balanced.append(d_str)
+
+    return balanced, sparse, dense
+
+
+def balance_data(
+    df: pd.DataFrame,
+    ticker: str = "?",
+    target_bars: int = _EXPECTED_BARS_PER_DAY,
+    max_bars: int = _BARS_PER_DAY_MAX,
+) -> pd.DataFrame:
+    """Balance data distribution: downsample dense dates, flag sparse dates.
+
+    Dense dates (> max_bars) are resampled to ~target_bars by taking
+    evenly-spaced rows. Sparse dates are left as-is (they may be half-days
+    or holidays).
+
+    Returns a balanced DataFrame sorted by timestamp.
+    """
+    if df is None or df.empty:
+        return df
+
+    # Group by date
+    df = df.copy()
+    df["_date"] = df["timestamp"].dt.date
+
+    balanced_frames = []
+    for date_val, group in df.groupby("_date", sort=False):
+        count = len(group)
+        if count > max_bars:
+            # Downsample: take evenly-spaced rows
+            step = count / target_bars
+            indices = [int(i * step) for i in range(target_bars)]
+            indices = [i for i in indices if i < count]
+            group = group.iloc[sorted(set(indices))]
+
+        balanced_frames.append(group)
+
+    result = pd.concat(balanced_frames, ignore_index=True)
+    result = result.drop(columns=["_date"])
+    result = result.sort_values("timestamp").reset_index(drop=True)
+    return result
+
+
 def merge_and_dedup(
     existing_path: Path,
     new_df: pd.DataFrame,
@@ -318,12 +407,13 @@ def backfill_ticker(
     days: int,
     force: bool = False,
     check_only: bool = False,
+    balance: bool = False,
     verbose: bool = False,
 ) -> Tuple[str, str, int]:
     """Backfill a single ticker.
 
     Returns: (ticker, status, bar_count)
-        status: "ok", "skipped", "empty", "error"
+        status: "ok", "skipped", "empty", "error", "balanced"
         bar_count: number of bars fetched (0 if skipped/empty/error)
     """
     cache_path = BARS_DIR / f"{ticker}.parquet"
@@ -377,6 +467,24 @@ def backfill_ticker(
     # Merge with existing data (dedup on timestamp)
     merged = merge_and_dedup(cache_path, new_df)
 
+    # Validate data distribution
+    balanced_dates, sparse_dates, dense_dates = validate_data_distribution(
+        merged, ticker=ticker
+    )
+    if dense_dates and verbose:
+        print(f"  {ticker}: WARNING — {len(dense_dates)} dense date(s) detected: {', '.join(dense_dates[:3])}"
+              f"{'...' if len(dense_dates) > 3 else ''}")
+    if sparse_dates and verbose:
+        print(f"  {ticker}: sparse dates (may be half-days/holidays): {len(sparse_dates)}")
+
+    # Balance data if requested and dense dates exist
+    status = "ok"
+    if balance and dense_dates:
+        merged = balance_data(merged, ticker=ticker)
+        status = "balanced"
+        if verbose:
+            print(f"  {ticker}: balanced {len(dense_dates)} dense date(s)")
+
     # Recompute indicators on the full merged dataset so boundary rows
     # get proper values (indicators computed only on new data would leave
     # NaN gaps at boundaries).
@@ -391,7 +499,7 @@ def backfill_ticker(
         print(f"  {ticker}: {new_count} new bars → {total_count} total "
               f"({len(merged['timestamp'].dt.date.unique())} dates)")
 
-    return ticker, "ok", new_count
+    return ticker, status, new_count
 
 
 def main():
@@ -422,6 +530,12 @@ def main():
         help="Force re-fetch all dates (ignore existing data freshness)",
     )
     parser.add_argument(
+        "--balance",
+        action="store_true",
+        help="Auto-balance data distribution: downsample dates with >100 bars "
+             "to ~78 bars (expected 5-min count)",
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Verbose output",
@@ -439,7 +553,7 @@ def main():
     print(f"  Output:  {BARS_DIR}")
     print(f"{'='*60}\n")
 
-    results: Dict[str, List[str]] = {"ok": [], "skipped": [], "empty": [], "error": [], "gaps": []}
+    results: Dict[str, List[str]] = {"ok": [], "skipped": [], "empty": [], "error": [], "gaps": [], "balanced": []}
     total_bars = 0
     total_start = time.time()
 
@@ -449,6 +563,7 @@ def main():
             days=args.days,
             force=args.force,
             check_only=args.check,
+            balance=args.balance,
             verbose=args.verbose or args.check,
         )
         results.setdefault(status, []).append(ticker_name)
@@ -478,6 +593,8 @@ def main():
                 print(f"      {ticker}: needs {start_s} → {end_s}")
     else:
         print(f"  ✓ Fetched: {len(results.get('ok', []))} tickers ({total_bars:,} new bars)")
+        if results.get("balanced"):
+            print(f"  ⚖ Balanced: {len(results['balanced'])} tickers ({', '.join(results['balanced'])})")
         print(f"  ⏭ Skipped: {len(results.get('skipped', []))} tickers (fully covered)")
         if results.get("empty"):
             print(f"  ⚠ Empty:   {len(results['empty'])} tickers ({', '.join(results['empty'])})")
