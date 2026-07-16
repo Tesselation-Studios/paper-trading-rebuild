@@ -490,6 +490,139 @@ def check_promotion(
     return check
 
 
+def seed_descendants(
+    conn: Any,
+    trader: VirtualTrader,
+    to_tier: str,
+    dry_run: bool = False,
+) -> int:
+    """Seed new Rookie virtuals from a promoted Expert or Elite trader.
+
+    Cross-trader learning (spec §6.4): When a trader reaches Expert or Elite,
+    its successful signal parameters seed 3 new Rookie virtuals. This creates
+    an evolutionary tree where the best ideas cascade down.
+
+    Args:
+        conn: Database connection
+        trader: The promoted VirtualTrader
+        to_tier: The tier the trader was promoted TO ("expert" or "elite")
+        dry_run: If True, only log what would happen
+
+    Returns:
+        Number of descendants created
+    """
+    if to_tier not in ("expert", "elite"):
+        return 0
+
+    # Extract seedable params from the parent's config
+    seed_params = _extract_seed_params(trader.config)
+    if not seed_params:
+        log.info(f"  No seedable params found in {trader.name}'s config — skipping descendants")
+        return 0
+
+    base = trader.base_trader
+    parent_name = trader.name
+    created = 0
+
+    # Check existing descendants to avoid re-seeding the same parent
+    existing = 0
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT COUNT(*) FROM trading.virtual_traders WHERE config->>'parent' = %s",
+            (parent_name,),
+        )
+        row = cur.fetchone()
+        if row and row[0] > 0:
+            log.info(
+                f"  {parent_name} already has {row[0]} descendants — skipping re-seed"
+            )
+            return 0
+
+    for i in range(3):
+        descendant_name = f"{base}-desc-{parent_name.split('-')[-1]}-{i+1}"
+
+        # Check for name collision
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id FROM trading.virtual_traders WHERE name = %s",
+                (descendant_name,),
+            )
+            if cur.fetchone():
+                log.warning(f"  Descendant name collision: {descendant_name} — skipping")
+                continue
+
+        # Build config: inherit parent params + add tracking metadata
+        descendant_config = dict(seed_params)
+        # Add slight variation so they aren't identical clones
+        if "temperature" not in descendant_config:
+            descendant_config["temperature"] = 0.3
+        descendant_config["temperature"] = round(
+            descendant_config["temperature"] + (i - 1) * 0.05, 3
+        )
+        descendant_config["parent"] = parent_name
+        descendant_config["parent_tier"] = to_tier
+        descendant_config["generation"] = trader.config.get("generation", 0) + 1
+
+        if dry_run:
+            log.info(
+                f"  [DRY RUN] Would seed descendant: {descendant_name} "
+                f"({to_tier}→rookie, parent={parent_name})"
+            )
+            created += 1
+            continue
+
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO trading.virtual_traders
+                   (name, base_trader, variant_type, config, status, tier, created_at, wins)
+                   VALUES (%s, %s, %s, %s::jsonb, 'active', 'rookie', %s, 0)""",
+                (
+                    descendant_name,
+                    base,
+                    "param",
+                    json.dumps(descendant_config),
+                    date.today(),
+                ),
+            )
+
+        log.info(
+            f"  🌱 Seeded descendant: {descendant_name} "
+            f"(rookie, parent={parent_name})"
+        )
+        created += 1
+
+    return created
+
+
+def _extract_seed_params(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract seedable signal parameters from a virtual trader's config.
+
+    Returns a subset of the config suitable for seeding new virtuals.
+    Strips tracking metadata (parent, generation, etc.) and keeps only
+    strategy-relevant parameters.
+    """
+    if not config:
+        return {}
+
+    # Keys to exclude from seeding (tracking/metadata only)
+    _META_KEYS = {"parent", "parent_tier", "generation", "descendant_of",
+                   "created_from", "seed_date", "lineage"}
+
+    # Strategy-relevant keys to seed
+    seeded = {}
+    for key, value in config.items():
+        if key in _META_KEYS:
+            continue
+        # Only seed scalar/primitive params (skip nested structures that
+        # might encode non-transferable state)
+        if isinstance(value, (str, int, float, bool)):
+            seeded[key] = value
+        elif isinstance(value, list) and all(isinstance(v, (str, int, float)) for v in value):
+            seeded[key] = list(value)
+
+    return seeded
+
+
 def run_promotion_check(
     base_trader: Optional[str] = None,
     dry_run: bool = False,
@@ -542,7 +675,8 @@ def run_promotion_check(
                             metrics=metrics,
                         )
                         if not dry_run:
-                            promote_trader(conn, trader, next_tier, result.reason, metrics)
+                            if promote_trader(conn, trader, next_tier, result.reason, metrics):
+                                seed_descendants(conn, trader, next_tier, dry_run)
                         results.append(result)
                         log.info(f"Force promoted {trader.name} → {next_tier}")
                     continue
@@ -560,7 +694,8 @@ def run_promotion_check(
                         metrics=metrics,
                     )
                     if not dry_run:
-                        promote_trader(conn, trader, check.to_tier, result.reason, metrics)
+                        if promote_trader(conn, trader, check.to_tier, result.reason, metrics):
+                            seed_descendants(conn, trader, check.to_tier, dry_run)
                     results.append(result)
                     log.info(f"Promoting {trader.name}: {check.from_tier}→{check.to_tier}")
                 else:
