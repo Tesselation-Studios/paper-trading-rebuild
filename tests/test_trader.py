@@ -15,6 +15,8 @@ from src.trader import (
 from src.signals import SignalParams
 from src.safety import BreakerLevel
 
+pytestmark = pytest.mark.integration
+
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 

@@ -89,11 +89,10 @@ def step_backfill(
         print(f"[nightly] DRY RUN: would backfill tickers={tickers}, days={days}")
         return 0, 0
 
-    backfill_script = SCRIPTS_DIR / "backfill_bars.py"
+    backfill_script = SCRIPTS_DIR / "backfill_bars_alpaca.py"
     if not backfill_script.exists():
-        print(f"[nightly] WARNING: backfill_bars.py not found at {backfill_script}")
-        print("[nightly] Skipping backfill step.")
-        return 0, 0
+        # Fallback to yfinance version
+        backfill_script = SCRIPTS_DIR / "backfill_bars.py"
 
     print(f"\n{'='*60}")
     print("  STEP 1/5: Backfill missing bars")

@@ -289,7 +289,7 @@ def _get_alpaca_portfolio(company: str) -> Optional[dict]:
 
 def _parse_decisions(company: str) -> list:
     """
-    Query decisions + orders from Postgres trading.decisions table.
+    Query decisions from Postgres trading.decisions table.
     Returns a list of event dicts matching the old JSONL format.
     """
     events = []
@@ -298,41 +298,29 @@ def _parse_decisions(company: str) -> list:
             return events
         try:
             rows = conn.execute(
-                """SELECT d.agent_id, d.timestamp, d.action, d.ticker, d.quantity,
-                          d.stop_loss, d.confidence, d.thesis,
-                          o.status AS order_status, o.order_id, o.error_reason
-                   FROM trader_decisions d
-                   LEFT JOIN orders o ON d.id = o.decision_id
-                   WHERE d.agent_id = %s
-                     AND UPPER(d.action) NOT IN ('HOLD', 'HOLD_CASH', 'HOLD_ALL',
-                                                  'PASS', 'NO_ENTRY', 'OBSERVATION', 'OVERVIEW')
-                   ORDER BY d.timestamp DESC""",
+                """SELECT trader_id, timestamp, decision as action, ticker,
+                          conviction as confidence, rationale as thesis
+                   FROM trading.decisions
+                   WHERE trader_id = %s
+                   ORDER BY timestamp DESC
+                   LIMIT 100""",
                 (f"trader-{company}",),
             ).fetchall()
             for r in rows:
                 events.append({
                     "timestamp":    r["timestamp"],
-                    "trader":       r["agent_id"],
+                    "trader":       r["trader_id"],
                     "decision": {
                         "action":   r["action"],
                         "ticker":   r["ticker"],
-                        "quantity": r["quantity"],
-                        "confidence": r["confidence"],
-                        "thesis":   r["thesis"],
-                        "stop_loss": r["stop_loss"],
-                    },
-                    "order": {
-                        "status":   r["order_status"],
-                        "order_id": r["order_id"],
-                        "reason":   r["error_reason"],
+                        "confidence": float(r["confidence"]) if r["confidence"] is not None else None,
+                        "thesis":   r["thesis"] or "",
                     },
                 })
         except Exception:
             pass
     return events
 
-
-# ── Benchmark helpers ────────────────────────────────────────────────────────
 
 def _get_benchmark_data() -> dict:
     """Get current SPY/QQQ prices and compute benchmark comparisons.
@@ -566,6 +554,27 @@ def _get_trade_stats(company: str) -> dict:
         pass
     return result
 
+def _normalize_timestamp(ts) -> str | None:
+    """Normalize a timestamp for display — handles journalT format, ISO dates, etc."""
+    if not ts:
+        return None
+    try:
+        # Try parsing as ISO date first
+        if isinstance(ts, str):
+            dt = datetime.fromisoformat(ts)
+            return dt.isoformat()
+    except (ValueError, TypeError):
+        pass
+    # Handle journalT12:29:00 or T12:29:00 format
+    if isinstance(ts, str) and "T" in ts:
+        # Get everything after the last T (time portion)
+        time_part = ts.split("T")[-1]
+        if time_part and time_part.count(":") == 2:
+            return f"2026-07-15T{time_part}"
+    # Nothing we can parse — return None so callers know to hide it
+    return None
+
+
 def _get_last_activity(company: str) -> str | None:
     """Get the most recent journal entry timestamp for a trader from the shared DB.
 
@@ -579,22 +588,7 @@ def _get_last_activity(company: str) -> str | None:
                 (f"trader-{company}",),
             ).fetchone()
         ts = row["max_ts"] if row else None
-        if ts:
-            # Validate — ensure it's a real ISO date, not 'journalT12:29:00'
-            try:
-                dt = datetime.fromisoformat(ts)
-                return ts  # valid ISO date
-            except (ValueError, TypeError):
-                # Try to extract just the time portion for display
-                # Format: journalT12:29:00 or T12:29:00
-                if isinstance(ts, str) and "T" in ts:
-                    time_part = ts.split("T")[-1]
-                    if time_part and time_part.count(":") == 2:
-                        # Return just the time as a string that won't break Date()
-                        # We'll use a fake date so the frontend can format it
-                        return f"2026-07-15T{time_part}"
-                return None  # Can't parse, hide it
-        return None
+        return _normalize_timestamp(ts)
     except Exception:
         return None
 
@@ -980,6 +974,9 @@ def api_journal():
                     (limit,)
                 ).fetchall()
                 entries = [dict(r) for r in rows]
+                # Normalize timestamps — handle journalT format
+                for e in entries:
+                    e["timestamp"] = _normalize_timestamp(e.get("timestamp")) or e.get("timestamp", "")
             except Exception:
                 pass
 

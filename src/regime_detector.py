@@ -1,422 +1,914 @@
+#!/usr/bin/env python3
 """
-K-Means Regime Detector — replaces HMM CHOPPY/SUSTAINABLE/EXHAUSTED.
+regime_detector.py — K-Means market regime detection per SPEC #149.
 
-Uses K-Means clustering (k=5) on multi-TF feature vectors to identify
-market regimes without the degenerate state collapse problem of HMMs.
+Replaces the legacy rule-based classifier (TRENDING_UP/DOWN/HIGH_VOL/
+MEAN_REVERTING heuristic) with a statistically grounded K-Means
+clustering model trained on 6 months of 5-min SPY bars.
 
-Features:
-- Multi-timeframe momentum (5d, 20d, 50d)
-- RSI + RSI trend
-- MACD cross + histogram
-- Volatility (ATR %)
-- Volume trend
-- Price velocity
-- Sector breadth (XLK, XLF, XLY momentum)
-
-Regime labels are numerical cluster IDs with descriptive names assigned
-by feature centroid analysis. Auto-retrains daily via cron or API call.
+Architecture:
+  1. Fetch 6 months of 5-min bars for SPY (market proxy)
+  2. Engineer 10 features capturing trend, volatility, volume, and momentum
+  3. Fit K-Means (k=6) to cluster observations into market regimes
+  4. Label clusters by their feature profiles (trending, ranging, volatile, etc.)
+  5. Save model to disk; load for inference at tick time
+  6. Output regime label + confidence score compatible with tick_prompt.py
 
 Usage:
-    detector = RegimeDetector(k=5)
-    detector.fit(price_history)  # train on 2y SPY data
-    regime = detector.predict(current_features)  # → {cluster: 2, label: "momentum", confidence: 0.87}
+    # Train and save model
+    python src/regime_detector.py --train
+
+    # Classify latest regime (online inference)
+    python src/regime_detector.py --classify
+
+    # Compare rule-based vs K-Means on historical data
+    python src/regime_detector.py --compare
+
+    # From code:
+    from src.regime_detector import RegimeDetector
+    detector = RegimeDetector()
+    detector.train()  # or detector.load()
+    result = detector.classify_latest()
+    print(result["regime"], result["confidence"])
 """
 
 from __future__ import annotations
 
+import argparse
 import json
-import logging
+import os
 import pickle
+import sys
+import warnings
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Optional
 
 import numpy as np
+import pandas as pd
+import yfinance as yf
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 
-log = logging.getLogger("regime-detector")
+# Suppress yfinance FutureWarnings
+warnings.filterwarnings("ignore", category=FutureWarning)
 
-# ── Regime descriptions (assigned after clustering, by centroid analysis) ────
-REGIME_LABELS = {
-    0: "momentum_bull",      # Strong upward momentum, high RSI, positive breadth
-    1: "momentum_bear",      # Strong downward momentum, low RSI, negative breadth
-    2: "mean_reversion",     # Sideways/oscillating — RSI 40-60, flat MACD
-    3: "volatility_spike",   # High ATR, wide swings — risk-on/off whipsaw
-    4: "low_vol_drift",      # Tight range, low volume — summer doldrums / pre-FOMC
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+REPO_ROOT = Path(__file__).resolve().parent.parent
+STATE_DIR = REPO_ROOT / "state"
+MODEL_PATH = STATE_DIR / "kmeans_regime_model.pkl"
+SCALER_PATH = STATE_DIR / "kmeans_regime_scaler.pkl"
+METADATA_PATH = STATE_DIR / "kmeans_regime_metadata.json"
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+MARKET_PROXY = "SPY"
+DEFAULT_LOOKBACK_MONTHS = 6
+DEFAULT_INTERVAL = "5m"
+N_CLUSTERS = 6
+MIN_TRAIN_SAMPLES = 500
+
+# Cluster label mapping — derived from feature profiles post-training
+# These are assigned after clustering by analyzing cluster centroids
+REGIME_LABELS: dict[int, str] = {
+    0: "TRENDING_UP",
+    1: "TRENDING_DOWN",
+    2: "HIGH_VOLATILITY",
+    3: "CALM",
+    4: "MEAN_REVERTING",
+    5: "CRASH",
 }
+
+# Legacy rule-based regime names (for comparison)
+LEGACY_REGIMES = {"TRENDING_UP", "TRENDING_DOWN", "HIGH_VOL", "MEAN_REVERTING"}
 
 
 @dataclass
 class RegimeResult:
-    """Output from regime detection."""
-    cluster: int
-    label: str
-    confidence: float           # 0-1 distance from cluster center (1 = dead center)
-    description: str
-    features: Dict[str, float]  # current feature vector
-    centroids: Dict[int, Dict[str, float]]  # all cluster centroids for context
-    retrain_age_hours: float
-
-    def to_dict(self) -> dict:
-        return {
-            "cluster": self.cluster,
-            "label": self.label,
-            "confidence": round(self.confidence, 4),
-            "description": self.description,
-            "features": {k: round(v, 6) for k, v in self.features.items()},
-            "retrain_age_hours": round(self.retrain_age_hours, 1),
-        }
+    """Result of regime classification."""
+    regime: str
+    confidence: float
+    cluster_id: int
+    timestamp: str
+    features: dict[str, float]
+    feature_values: dict[str, float] = field(default_factory=dict)
 
 
-@dataclass
-class RegimeDetector:
-    """K-Means regime detector with auto-retrain capability."""
+# ---------------------------------------------------------------------------
+# Feature engineering
+# ---------------------------------------------------------------------------
 
-    k: int = 5
-    model_path: str = field(default="")
-    random_state: int = 42
+def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Engineer 10 features for K-Means regime detection.
 
-    def __post_init__(self):
-        self._scaler: Optional[StandardScaler] = None
-        self._kmeans: Optional[KMeans] = None
-        self._feature_names: List[str] = []
-        self._centroid_labels: Dict[int, str] = {}
-        self._trained_at: Optional[datetime] = None
+    Args:
+        df: DataFrame with columns: Open, High, Low, Close, Volume
+            (single-level columns, not MultiIndex)
 
-        if self.model_path:
-            self._load()
+    Returns:
+        DataFrame with 10 engineered features (rows with NaNs dropped).
 
-    # ── Public API ───────────────────────────────────────────────────────────
+    Features:
+        1.  return_5      — 5-period log return
+        2.  volatility_20 — 20-period std of returns (annualized proxy)
+        3.  rsi_14        — 14-period RSI
+        4.  volume_ratio  — Volume / 20-period avg volume
+        5.  sma20_dist    — (Close - SMA20) / SMA20
+        6.  sma50_dist    — (Close - SMA50) / SMA50
+        7.  trend_sma     — SMA20 / SMA50 - 1 (trend direction & strength)
+        8.  bb_position   — (Close - BB_lower) / (BB_upper - BB_lower)
+        9.  atr_ratio     — ATR(14) / Close
+        10. momentum_10   — 10-period log return
+    """
+    close = df["Close"].astype(float).squeeze()
+    high = df["High"].astype(float).squeeze()
+    low = df["Low"].astype(float).squeeze()
+    volume = df["Volume"].astype(float).squeeze()
 
-    def fit(self, price_history: List[dict], symbols: Optional[List[str]] = None) -> "RegimeDetector":
-        """Train K-Means on historical data.
+    features = pd.DataFrame(index=df.index)
 
-        Args:
-            price_history: List of {symbol, date, open, high, low, close, volume} dicts
-            symbols: Symbols to include (default: ["SPY"])
+    # 1. 5-period return
+    features["return_5"] = np.log(close / close.shift(5))
 
-        Returns:
-            self for chaining
-        """
-        symbols = symbols or ["SPY"]
-        features, names = self._extract_features(price_history, symbols)
-        self._feature_names = names
-        X = np.array(features)
+    # 2. 20-period volatility (annualized daily, scaled for 5-min)
+    log_ret = np.log(close / close.shift(1))
+    features["volatility_20"] = log_ret.rolling(20).std()
 
-        if len(X) < self.k * 10:
-            raise ValueError(f"Need at least {self.k * 10} data points, got {len(X)}")
+    # 3. 14-period RSI
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = (-delta).clip(lower=0)
+    avg_gain = gain.rolling(14, min_periods=14).mean()
+    avg_loss = loss.rolling(14, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    features["rsi_14"] = 100.0 - (100.0 / (1.0 + rs))
 
-        self._scaler = StandardScaler()
-        X_scaled = self._scaler.fit_transform(X)
+    # 4. Volume ratio
+    features["volume_ratio"] = volume / volume.rolling(20).mean()
 
-        self._kmeans = KMeans(n_clusters=self.k, random_state=self.random_state, n_init=10)
-        self._kmeans.fit(X_scaled)
+    # 5. Price distance from SMA20
+    sma20 = close.rolling(20).mean()
+    features["sma20_dist"] = (close - sma20) / sma20
 
-        self._assign_labels()
-        self._trained_at = datetime.now()
-        self._save()
+    # 6. Price distance from SMA50
+    sma50 = close.rolling(50).mean()
+    features["sma50_dist"] = (close - sma50) / sma50
 
-        log.info(f"K-Means regime detector trained: k={self.k}, n_samples={len(X)}")
-        return self
+    # 7. SMA trend indicator
+    features["trend_sma"] = sma20 / sma50 - 1.0
 
-    def predict(self, current_features: Dict[str, float]) -> RegimeResult:
-        """Predict regime from current feature snapshot.
+    # 8. Bollinger Band position
+    bb_std = close.rolling(20).std()
+    bb_upper = sma20 + 2 * bb_std
+    bb_lower = sma20 - 2 * bb_std
+    bb_range = bb_upper - bb_lower
+    features["bb_position"] = np.where(
+        bb_range > 0, (close - bb_lower) / bb_range, 0.5
+    )
 
-        Args:
-            current_features: Dict of feature_name → value
+    # 9. ATR ratio (14-period)
+    tr1 = high - low
+    tr2 = (high - close.shift(1)).abs()
+    tr3 = (low - close.shift(1)).abs()
+    true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr14 = true_range.rolling(14).mean()
+    features["atr_ratio"] = atr14 / close
 
-        Returns:
-            RegimeResult with cluster assignment and metadata
-        """
-        if self._kmeans is None:
-            if self.model_path:
-                self._load()
-            if self._kmeans is None:
-                raise RuntimeError("Model not trained. Call .fit() first.")
+    # 10. 10-period momentum
+    features["momentum_10"] = np.log(close / close.shift(10))
 
-        # Build feature vector in correct order
-        X = np.array([[current_features.get(name, 0.0) for name in self._feature_names]])
-        X_scaled = self._scaler.transform(X)
+    # Drop rows with NaN from rolling calculations
+    return features.dropna()
 
-        cluster = int(self._kmeans.predict(X_scaled)[0])
-        distances = self._kmeans.transform(X_scaled)[0]
 
-        # Confidence: 1 - normalized distance from center
-        # The farthest cluster distance anchors the normalization
-        max_dist = np.max(distances)
-        min_dist = distances[cluster]
-        confidence = 1.0 - (min_dist / max_dist) if max_dist > 0 else 1.0
+# ---------------------------------------------------------------------------
+# Data fetching
+# ---------------------------------------------------------------------------
 
-        label = self._centroid_labels.get(cluster, REGIME_LABELS.get(cluster, f"cluster_{cluster}"))
-        description = self._describe_regime(label, current_features)
+def fetch_market_data(
+    ticker: str = MARKET_PROXY,
+    months: int = DEFAULT_LOOKBACK_MONTHS,
+    interval: str = DEFAULT_INTERVAL,
+) -> pd.DataFrame:
+    """Fetch historical market data via yfinance.
 
-        age_hours = 0.0
-        if self._trained_at:
-            age_hours = (datetime.now() - self._trained_at).total_seconds() / 3600
+    Args:
+        ticker: Market proxy ticker (default: SPY).
+        months: Lookback period in months.
+        interval: Bar interval (default: 5m).
 
-        return RegimeResult(
-            cluster=cluster,
-            label=label,
-            confidence=confidence,
-            description=description,
-            features=current_features,
-            centroids=self._get_centroids(),
-            retrain_age_hours=age_hours,
+    Returns:
+        DataFrame with single-level columns: Open, High, Low, Close, Volume.
+
+    Raises:
+        RuntimeError: If data download fails or returns insufficient bars.
+    """
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(days=months * 31)
+
+    try:
+        data = yf.download(
+            ticker,
+            start=start.strftime("%Y-%m-%d"),
+            end=end.strftime("%Y-%m-%d"),
+            interval=interval,
+            progress=False,
+            auto_adjust=True,
+        )
+    except Exception as e:
+        raise RuntimeError(f"yfinance download failed for {ticker}: {e}") from e
+
+    if data is None or (hasattr(data, "empty") and data.empty):
+        raise RuntimeError(f"No data returned for {ticker} ({months}mo, {interval})")
+
+    # Flatten MultiIndex columns if present
+    if isinstance(data.columns, pd.MultiIndex):
+        data.columns = data.columns.get_level_values(0)
+
+    # Ensure required columns exist
+    required = {"Open", "High", "Low", "Close", "Volume"}
+    missing = required - set(data.columns)
+    if missing:
+        raise RuntimeError(f"Missing columns in data: {missing}")
+
+    if len(data) < MIN_TRAIN_SAMPLES:
+        raise RuntimeError(
+            f"Insufficient data: {len(data)} rows (need >= {MIN_TRAIN_SAMPLES})"
         )
 
-    # ── Feature Extraction ───────────────────────────────────────────────────
+    return data
 
-    def _extract_features(self, data: List[dict], symbols: List[str]) -> Tuple[List[List[float]], List[str]]:
-        """Extract multi-TF feature vectors from OHLCV data."""
-        feature_names = []
-        feature_vectors = []
 
-        for symbol in symbols:
-            symbol_data = sorted(
-                [d for d in data if d.get("symbol", "").upper() == symbol.upper()],
-                key=lambda x: x.get("date", ""),
-            )
-            closes = np.array([d["close"] for d in symbol_data])
-            volumes = np.array([d.get("volume", 0) for d in symbol_data])
-            highs = np.array([d["high"] for d in symbol_data])
-            lows = np.array([d["low"] for d in symbol_data])
+# ---------------------------------------------------------------------------
+# Cluster labeling — map cluster IDs to human-readable regimes
+# ---------------------------------------------------------------------------
 
-            for i in range(50, len(closes)):
-                window = closes[max(0, i-50):i+1]
-                vol_window = volumes[max(0, i-50):i+1]
+def label_clusters(
+    kmeans: KMeans,
+    feature_names: list[str],
+) -> dict[int, str]:
+    """Analyze cluster centroids and assign human-readable regime labels.
 
-                features = {
-                    # Momentum (multi-TF)
-                    f"{symbol}_mom_5d": self._pct_change(window, 5),
-                    f"{symbol}_mom_20d": self._pct_change(window, 20),
-                    f"{symbol}_mom_50d": self._pct_change(window, min(50, len(window)-1)),
-                    # RSI
-                    f"{symbol}_rsi_14": self._compute_rsi(window, 14),
-                    f"{symbol}_rsi_trend": self._compute_rsi_trend(window, 14),
-                    # MACD
-                    f"{symbol}_macd_diff": self._compute_macd_diff(window),
-                    # Volatility
-                    f"{symbol}_atr_pct": self._compute_atr_pct(highs[max(0,i-20):i+1], lows[max(0,i-20):i+1], window),
-                    # Volume
-                    f"{symbol}_vol_trend": self._pct_change(vol_window.astype(float), min(20, len(vol_window)-1)),
-                    # Price velocity (acceleration)
-                    f"{symbol}_price_vel": self._price_velocity(window),
-                }
+    Rules (applied to normalized centroids):
+      - High volatility_20 + high atr_ratio + extreme return_5 → CRASH
+      - High volatility_20 + high atr_ratio → HIGH_VOLATILITY
+      - High momentum_10 + positive trend_sma + high rsi_14 → TRENDING_UP
+      - Low momentum_10 + negative trend_sma + low rsi_14 → TRENDING_DOWN
+      - Low volatility_20 + near-zero trend_sma → CALM
+      - Near-zero momentum + bb_position ≈ 0.5 → MEAN_REVERTING
 
-                if i == 50:  # first pass: collect names
-                    feature_names = list(features.keys())
+    Args:
+        kmeans: Fitted KMeans model.
+        feature_names: List of feature names in order.
 
-                feature_vectors.append([features.get(name, 0.0) for name in feature_names])
+    Returns:
+        Dict mapping cluster_id → regime label string.
+    """
+    centers = kmeans.cluster_centers_  # shape: (n_clusters, n_features)
+    n_clusters = centers.shape[0]
 
-        return feature_vectors, feature_names
+    # Build feature index map
+    idx = {name: i for i, name in enumerate(feature_names)}
 
-    # ── Technical Indicators ─────────────────────────────────────────────────
+    labels: dict[int, str] = {}
+    used_regimes: set[str] = set()
 
-    def _pct_change(self, series: np.ndarray, lookback: int) -> float:
-        if len(series) < lookback + 1:
-            return 0.0
-        return float((series[-1] - series[-lookback-1]) / series[-lookback-1])
+    for cid in range(n_clusters):
+        center = centers[cid]
 
-    def _compute_rsi(self, closes: np.ndarray, period: int = 14) -> float:
-        if len(closes) < period + 1:
-            return 50.0
-        deltas = np.diff(closes[-period-1:])
-        gains = np.maximum(deltas, 0)
-        losses = np.abs(np.minimum(deltas, 0))
-        avg_gain = np.mean(gains)
-        avg_loss = np.mean(losses)
-        if avg_loss == 0:
-            return 100.0
-        rs = avg_gain / avg_loss
-        return float(100.0 - (100.0 / (1.0 + rs)))
+        vol = center[idx["volatility_20"]]
+        atr = center[idx["atr_ratio"]]
+        mom = center[idx["momentum_10"]]
+        trend = center[idx["trend_sma"]]
+        rsi = center[idx["rsi_14"]]
+        ret5 = center[idx["return_5"]]
+        bb = center[idx["bb_position"]]
 
-    def _compute_rsi_trend(self, closes: np.ndarray, period: int = 14) -> float:
-        """RSI difference between now and 5 bars ago."""
-        if len(closes) < period + 6:
-            return 0.0
-        rsi_now = self._compute_rsi(closes, period)
-        rsi_ago = self._compute_rsi(closes[:-5], period)
-        return float(rsi_now - rsi_ago)
+        # Classification rules (ordered by priority)
+        if vol > 0.8 and atr > 0.8 and ret5 < -0.5:
+            label = "CRASH"
+        elif vol > 0.6 and atr > 0.5:
+            label = "HIGH_VOLATILITY"
+        elif mom > 0.3 and trend > 0.2 and rsi > 0.3:
+            label = "TRENDING_UP"
+        elif mom < -0.3 and trend < -0.2 and rsi < -0.5:
+            label = "TRENDING_DOWN"
+        elif abs(vol) < 0.3 and abs(trend) < 0.15:
+            label = "CALM"
+        elif abs(mom) < 0.3 and 0.3 < bb < 0.7 and abs(trend) < 0.2:
+            label = "MEAN_REVERTING"
+        else:
+            # Fallback: assign based on dominant feature
+            dominant = np.argmax(np.abs(center))
+            if dominant == idx["momentum_10"]:
+                label = "TRENDING_UP" if mom > 0 else "TRENDING_DOWN"
+            elif dominant == idx["volatility_20"]:
+                label = "HIGH_VOLATILITY"
+            elif dominant == idx["trend_sma"]:
+                label = "TRENDING_UP" if trend > 0 else "TRENDING_DOWN"
+            else:
+                label = "CALM"
 
-    def _compute_macd_diff(self, closes: np.ndarray) -> float:
-        """MACD line minus signal line."""
-        if len(closes) < 26:
-            return 0.0
-        ema12 = self._ema(closes, 12)
-        ema26 = self._ema(closes, 26)
-        macd_line = ema12 - ema26
+        # Ensure uniqueness — use alternative labels for duplicates
+        base_label = label
+        duplicates: dict[str, list[str]] = {
+            "TRENDING_UP": ["BULLISH", "MOMENTUM", "STRONG_TREND"],
+            "TRENDING_DOWN": ["BEARISH", "WEAKNESS", "DECLINE"],
+            "HIGH_VOLATILITY": ["VOLATILE", "CHOPPY", "TURBULENT"],
+            "CALM": ["QUIET", "LOW_VOL", "STABLE"],
+            "MEAN_REVERTING": ["OSCILLATING", "RANGE_BOUND", "SIDEWAYS"],
+            "CRASH": ["PANIC", "SELLOFF", "FEAR"],
+        }
+        if label in used_regimes:
+            alts = duplicates.get(base_label, [])
+            for alt in alts:
+                if alt not in used_regimes:
+                    label = alt
+                    break
+            else:
+                suffix = 2
+                while f"{base_label}_{suffix}" in used_regimes:
+                    suffix += 1
+                label = f"{base_label}_{suffix}"
+        used_regimes.add(label)
+        labels[cid] = label
 
-        # Signal line: 9-period EMA of MACD line (approximate)
-        if len(closes) < 35:
-            return 0.0
-        # Fast approximation using last value
-        return float(macd_line)
+    return labels
 
-    def _ema(self, series: np.ndarray, period: int) -> float:
-        if len(series) < period:
-            return float(np.mean(series))
-        alpha = 2.0 / (period + 1)
-        result = np.mean(series[:period])
-        for val in series[period:]:
-            result = alpha * val + (1 - alpha) * result
-        return float(result)
 
-    def _compute_atr_pct(self, highs: np.ndarray, lows: np.ndarray, closes: np.ndarray, period: int = 14) -> float:
-        if len(highs) < period or len(lows) < period:
-            return 0.0
-        tr = np.maximum(highs[-period:] - lows[-period:],
-                        np.abs(highs[-period:] - np.roll(closes[-period:], 1)))
-        atr = np.mean(tr)
-        return float(atr / closes[-1]) if closes[-1] > 0 else 0.0
+# ---------------------------------------------------------------------------
+# Rule-based classifier (for comparison)
+# ---------------------------------------------------------------------------
 
-    def _price_velocity(self, closes: np.ndarray) -> float:
-        """Second derivative of price — acceleration."""
-        if len(closes) < 5:
-            return 0.0
-        returns = np.diff(closes[-5:]) / closes[-5:-1]
-        return float(np.diff(returns).mean()) if len(returns) > 1 else 0.0
+def classify_rule_based(row: pd.Series) -> str:
+    """Legacy rule-based regime classifier.
 
-    # ── Label Assignment ─────────────────────────────────────────────────────
+    Uses simple thresholds on a few features to assign regimes.
+    This is the heuristic being replaced by K-Means per issue #149.
 
-    def _assign_labels(self):
-        """Assign human-readable labels to clusters based on centroid features.
-        
-        Centroids are Z-scored (mean=0, std≈1 across the training set).
-        Labels are assigned by ranking clusters on key dimensions:
-        - Highest momentum → momentum_bull
-        - Highest volatility → volatility_spike
-        - Lowest momentum → momentum_bear
-        - Lowest volatility → low_vol_drift
-        - Remaining → mean_reversion
+    Returns one of: TRENDING_UP, TRENDING_DOWN, HIGH_VOL, MEAN_REVERTING
+    """
+    rsi = row.get("rsi_14", 50)
+    trend = row.get("trend_sma", 0)
+    vol_ratio = row.get("volume_ratio", 1)
+    atr = row.get("atr_ratio", 0.01)
+
+    if atr > 0.03 or vol_ratio > 2.0:
+        return "HIGH_VOL"
+    elif trend > 0.003 and rsi > 55:
+        return "TRENDING_UP"
+    elif trend < -0.003 and rsi < 45:
+        return "TRENDING_DOWN"
+    else:
+        return "MEAN_REVERTING"
+
+
+# ---------------------------------------------------------------------------
+# RegimeDetector — main class
+# ---------------------------------------------------------------------------
+
+class RegimeDetector:
+    """K-Means market regime detector.
+
+    Trains on SPY 5-min bars, classifies current market state into
+    one of 6 regimes: TRENDING_UP, TRENDING_DOWN, HIGH_VOLATILITY,
+    CALM, MEAN_REVERTING, or CRASH.
+
+    Model is persisted to disk for fast inference without retraining.
+    """
+
+    def __init__(
+        self,
+        ticker: str = MARKET_PROXY,
+        n_clusters: int = N_CLUSTERS,
+        model_dir: Path = STATE_DIR,
+        random_state: int = 42,
+    ):
+        self.ticker = ticker
+        self.n_clusters = n_clusters
+        self.model_dir = model_dir
+        self.model_path = model_dir / "kmeans_regime_model.pkl"
+        self.scaler_path = model_dir / "kmeans_regime_scaler.pkl"
+        self.metadata_path = model_dir / "kmeans_regime_metadata.json"
+        self.random_state = random_state
+
+        self.kmeans: Optional[KMeans] = None
+        self.scaler: Optional[StandardScaler] = None
+        self.feature_names: list[str] = []
+        self.cluster_labels: dict[int, str] = {}
+        self.is_trained: bool = False
+        self._training_data: Optional[pd.DataFrame] = None
+
+    # ------------------------------------------------------------------
+    # Training
+    # ------------------------------------------------------------------
+
+    def train(
+        self,
+        months: int = DEFAULT_LOOKBACK_MONTHS,
+        interval: str = DEFAULT_INTERVAL,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """Train the K-Means model on historical market data.
+
+        Args:
+            months: Lookback period in months.
+            interval: Bar interval (e.g., '5m').
+            force: If True, retrain even if saved model exists.
+
+        Returns:
+            Dict with training metadata (n_samples, inertia, cluster_sizes, etc.).
         """
-        centroids = self._kmeans.cluster_centers_
-        labels = {}
+        # 1. Fetch data
+        print(f"[regime_detector] Fetching {months}mo of {interval} bars for {self.ticker}...")
+        data = fetch_market_data(self.ticker, months=months, interval=interval)
+        print(f"[regime_detector] Downloaded {len(data)} bars from {data.index[0]} to {data.index[-1]}")
 
-        # Find feature indices
-        mom_idx = self._feature_names.index("SPY_mom_20d") if "SPY_mom_20d" in self._feature_names else 0
-        rsi_idx = self._feature_names.index("SPY_rsi_14") if "SPY_rsi_14" in self._feature_names else 1
-        atr_idx = self._feature_names.index("SPY_atr_pct") if "SPY_atr_pct" in self._feature_names else -1
-        vol_idx = self._feature_names.index("SPY_vol_trend") if "SPY_vol_trend" in self._feature_names else -1
+        # 2. Engineer features
+        features_df = engineer_features(data)
+        if len(features_df) < MIN_TRAIN_SAMPLES:
+            raise RuntimeError(
+                f"Insufficient feature rows after NaN drop: {len(features_df)} "
+                f"(need >= {MIN_TRAIN_SAMPLES})"
+            )
+        self.feature_names = list(features_df.columns)
+        print(f"[regime_detector] Engineered {len(self.feature_names)} features: {self.feature_names}")
+        print(f"[regime_detector] Training samples: {len(features_df)}")
 
-        # Extract scores per cluster
-        cluster_scores = []
-        for i, centroid in enumerate(centroids):
-            mom_score = centroid[mom_idx]
-            rsi_score = centroid[rsi_idx] if rsi_idx >= 0 else 0
-            atr_score = centroid[atr_idx] if atr_idx >= 0 else 0
-            vol_score = centroid[vol_idx] if vol_idx >= 0 else 0
-            cluster_scores.append({
-                "id": i,
-                "mom": mom_score,
-                "rsi": rsi_score,
-                "atr": atr_score,
-                "vol": vol_score,
+        # 3. Scale features
+        self.scaler = StandardScaler()
+        X_scaled = self.scaler.fit_transform(features_df.values)
+
+        # 4. Fit K-Means
+        self.kmeans = KMeans(
+            n_clusters=self.n_clusters,
+            random_state=self.random_state,
+            n_init=10,
+            max_iter=300,
+        )
+        self.kmeans.fit(X_scaled)
+
+        # 5. Label clusters
+        self.cluster_labels = label_clusters(self.kmeans, self.feature_names)
+        self.is_trained = True
+        self._training_data = features_df
+
+        # 6. Persist model
+        self.save()
+
+        # 7. Build metadata
+        cluster_sizes = np.bincount(self.kmeans.labels_)
+        metadata = {
+            "ticker": self.ticker,
+            "n_clusters": self.n_clusters,
+            "n_samples": len(features_df),
+            "features": self.feature_names,
+            "inertia": float(self.kmeans.inertia_),
+            "cluster_labels": self.cluster_labels,
+            "cluster_sizes": {int(i): int(s) for i, s in enumerate(cluster_sizes)},
+            "trained_at": datetime.now(timezone.utc).isoformat(),
+            "data_start": str(data.index[0]),
+            "data_end": str(data.index[-1]),
+        }
+
+        # Print cluster summary
+        print(f"\n[regime_detector] Training complete. Clusters:")
+        for cid, label in sorted(self.cluster_labels.items()):
+            size = cluster_sizes[cid] if cid < len(cluster_sizes) else 0
+            pct = size / len(features_df) * 100
+            print(f"  Cluster {cid}: {label:20s} ({size:6d} samples, {pct:.1f}%)")
+        print(f"  Inertia: {self.kmeans.inertia_:.2f}")
+
+        return metadata
+
+    # ------------------------------------------------------------------
+    # Persistence
+    # ------------------------------------------------------------------
+
+    def save(self) -> None:
+        """Save model, scaler, and metadata to disk."""
+        self.model_dir.mkdir(parents=True, exist_ok=True)
+
+        with open(self.model_path, "wb") as f:
+            pickle.dump(self.kmeans, f)
+
+        with open(self.scaler_path, "wb") as f:
+            pickle.dump(self.scaler, f)
+
+        metadata = {
+            "ticker": self.ticker,
+            "n_clusters": self.n_clusters,
+            "feature_names": self.feature_names,
+            "cluster_labels": self.cluster_labels,
+            "saved_at": datetime.now(timezone.utc).isoformat(),
+        }
+        with open(self.metadata_path, "w") as f:
+            json.dump(metadata, f, indent=2)
+
+        print(f"[regime_detector] Model saved to {self.model_dir}")
+
+    def load(self) -> bool:
+        """Load pre-trained model from disk.
+
+        Returns:
+            True if model loaded successfully, False otherwise.
+        """
+        if not self.model_path.exists() or not self.scaler_path.exists():
+            return False
+
+        try:
+            with open(self.model_path, "rb") as f:
+                self.kmeans = pickle.load(f)
+            with open(self.scaler_path, "rb") as f:
+                self.scaler = pickle.load(f)
+            if self.metadata_path.exists():
+                with open(self.metadata_path) as f:
+                    meta = json.load(f)
+                    self.feature_names = meta.get("feature_names", [])
+                    self.cluster_labels = {
+                        int(k): v for k, v in meta.get("cluster_labels", {}).items()
+                    }
+            self.is_trained = True
+            return True
+        except (pickle.PickleError, json.JSONDecodeError, OSError) as e:
+            print(f"[regime_detector] Failed to load model: {e}", file=sys.stderr)
+            return False
+
+    def is_model_saved(self) -> bool:
+        """Check if a saved model exists on disk."""
+        return self.model_path.exists() and self.scaler_path.exists()
+
+    # ------------------------------------------------------------------
+    # Inference
+    # ------------------------------------------------------------------
+
+    def classify(
+        self,
+        features: np.ndarray | pd.DataFrame | dict[str, float],
+    ) -> RegimeResult:
+        """Classify a single observation into a market regime.
+
+        Args:
+            features: One row of the 10 engineered features.
+                      Can be a numpy array (same order as feature_names),
+                      a DataFrame row, or a dict of feature_name → value.
+
+        Returns:
+            RegimeResult with regime label, confidence, and cluster info.
+
+        Raises:
+            RuntimeError: If model is not trained/loaded.
+            ValueError: If features don't match expected feature_names.
+        """
+        if not self.is_trained or self.kmeans is None or self.scaler is None:
+            raise RuntimeError("Model not trained. Call train() or load() first.")
+
+        # Convert features to numpy array in correct order
+        if isinstance(features, dict):
+            try:
+                feature_vec = np.array(
+                    [[features[name] for name in self.feature_names]]
+                )
+                feature_dict = features
+            except KeyError as e:
+                raise ValueError(f"Missing feature: {e}") from e
+        elif isinstance(features, pd.DataFrame):
+            feature_vec = features[self.feature_names].values.reshape(1, -1)
+            feature_dict = features[self.feature_names].iloc[0].to_dict()
+        else:
+            feature_vec = np.array(features).reshape(1, -1)
+            if feature_vec.shape[1] != len(self.feature_names):
+                raise ValueError(
+                    f"Expected {len(self.feature_names)} features, got {feature_vec.shape[1]}"
+                )
+            feature_dict = {
+                name: float(feature_vec[0, i])
+                for i, name in enumerate(self.feature_names)
+            }
+
+        # Scale and predict
+        X_scaled = self.scaler.transform(feature_vec)
+        cluster_id = int(self.kmeans.predict(X_scaled)[0])
+
+        # Compute confidence as inverse distance to cluster center
+        # Lower distance → higher confidence
+        center = self.kmeans.cluster_centers_[cluster_id]
+        distance = np.linalg.norm(X_scaled[0] - center)
+
+        # Normalize confidence: distance to this center vs distances to all centers
+        all_distances = np.linalg.norm(X_scaled[0] - self.kmeans.cluster_centers_, axis=1)
+        min_dist = np.min(all_distances)
+        second_min = np.partition(all_distances, 1)[1] if len(all_distances) > 1 else min_dist + 1
+
+        # Confidence: how much closer to assigned center vs second-closest
+        if second_min > 0 and min_dist < second_min:
+            raw_conf = 1.0 - (min_dist / second_min)
+            # Scale to 0.5-1.0 range (never below 0.5 — always some confidence)
+            confidence = 0.5 + raw_conf * 0.5
+        else:
+            confidence = 0.5
+
+        confidence = float(np.clip(confidence, 0.0, 1.0))
+
+        regime = self.cluster_labels.get(cluster_id, f"REGIME_{cluster_id}")
+
+        return RegimeResult(
+            regime=regime,
+            confidence=round(confidence, 4),
+            cluster_id=cluster_id,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            features=feature_dict,
+            feature_values=feature_dict,
+        )
+
+    def classify_latest(
+        self,
+        ticker: Optional[str] = None,
+        lookback_bars: int = 60,
+        interval: str = DEFAULT_INTERVAL,
+    ) -> RegimeResult:
+        """Classify current market regime using most recent bars.
+
+        Fetches the latest bars, engineers features, and classifies
+        the most recent complete observation.
+
+        Args:
+            ticker: Ticker to classify (defaults to self.ticker).
+            lookback_bars: Number of recent bars to fetch (must be >= 50
+                           for SMA50 calculation).
+            interval: Bar interval.
+
+        Returns:
+            RegimeResult for the latest observation.
+        """
+        ticker = ticker or self.ticker
+
+        # Fetch recent data (need enough for rolling windows)
+        days_needed = max(10, lookback_bars // 78 + 2)  # ~78 5-min bars/day
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(days=days_needed)
+
+        data = yf.download(
+            ticker,
+            start=start.strftime("%Y-%m-%d"),
+            end=end.strftime("%Y-%m-%d"),
+            interval=interval,
+            progress=False,
+            auto_adjust=True,
+        )
+
+        if data is None or (hasattr(data, "empty") and data.empty):
+            raise RuntimeError(f"No recent data for {ticker}")
+
+        if isinstance(data.columns, pd.MultiIndex):
+            data.columns = data.columns.get_level_values(0)
+
+        features_df = engineer_features(data)
+
+        if len(features_df) == 0:
+            raise RuntimeError("No feature rows after engineering (need >= 50 bars)")
+
+        # Classify the most recent row
+        latest_features = features_df.iloc[-1:]
+        return self.classify(latest_features)
+
+    # ------------------------------------------------------------------
+    # Comparison
+    # ------------------------------------------------------------------
+
+    def compare_with_rule_based(
+        self,
+        months: int = DEFAULT_LOOKBACK_MONTHS,
+        interval: str = DEFAULT_INTERVAL,
+    ) -> pd.DataFrame:
+        """Compare K-Means vs rule-based classifications over historical data.
+
+        Returns:
+            DataFrame with columns: timestamp, kmeans_regime, rule_based_regime,
+            agreement (bool), and all 10 features.
+        """
+        if not self.is_trained or self.kmeans is None or self.scaler is None:
+            raise RuntimeError("Model not trained. Call train() first.")
+
+        data = fetch_market_data(self.ticker, months=months, interval=interval)
+        features_df = engineer_features(data)
+
+        results = []
+        for idx in range(len(features_df)):
+            row = features_df.iloc[idx : idx + 1]
+            row_series = features_df.iloc[idx]
+
+            # K-Means classification
+            km_result = self.classify(row)
+
+            # Rule-based classification
+            rb_regime = classify_rule_based(row_series)
+
+            results.append({
+                "timestamp": str(features_df.index[idx]),
+                "kmeans_regime": km_result.regime,
+                "rule_based_regime": rb_regime,
+                "agreement": km_result.regime == rb_regime or
+                              rb_regime in km_result.regime or
+                              km_result.regime in rb_regime,
+                "kmeans_confidence": km_result.confidence,
+                **{f"f_{name}": row_series[name] for name in self.feature_names},
             })
 
-        # Sort clusters by key attributes for ranking-based assignment
-        by_mom = sorted(cluster_scores, key=lambda c: c["mom"], reverse=True)
-        by_atr = sorted(cluster_scores, key=lambda c: c["atr"], reverse=True)
+        return pd.DataFrame(results)
 
-        # Assign labels using relative ranking (works regardless of scaling)
-        assigned = set()
+    def print_comparison_summary(self, comparison_df: pd.DataFrame) -> None:
+        """Print a summary of K-Means vs rule-based comparison."""
+        total = len(comparison_df)
+        agreement = comparison_df["agreement"].sum()
+        agreement_pct = (agreement / total * 100) if total > 0 else 0
 
-        # 1. Highest momentum cluster → momentum_bull
-        for cs in by_mom:
-            if cs["id"] not in assigned:
-                labels[cs["id"]] = "momentum_bull"
-                assigned.add(cs["id"])
-                break
+        print(f"\n{'='*70}")
+        print(f"  K-Means vs Rule-Based Regime Comparison")
+        print(f"  Ticker: {self.ticker} | Samples: {total}")
+        print(f"{'='*70}")
+        print(f"\n  Agreement rate: {agreement}/{total} ({agreement_pct:.1f}%)")
 
-        # 2. Lowest momentum cluster → momentum_bear
-        for cs in reversed(by_mom):
-            if cs["id"] not in assigned:
-                labels[cs["id"]] = "momentum_bear"
-                assigned.add(cs["id"])
-                break
+        # Regime distribution
+        print(f"\n  K-Means regime distribution:")
+        km_counts = comparison_df["kmeans_regime"].value_counts()
+        for regime, count in km_counts.items():
+            print(f"    {regime:20s}: {count:6d} ({count/total*100:5.1f}%)")
 
-        # 3. Highest ATR cluster → volatility_spike
-        for cs in by_atr:
-            if cs["id"] not in assigned:
-                labels[cs["id"]] = "volatility_spike"
-                assigned.add(cs["id"])
-                break
+        print(f"\n  Rule-based regime distribution:")
+        rb_counts = comparison_df["rule_based_regime"].value_counts()
+        for regime, count in rb_counts.items():
+            print(f"    {regime:20s}: {count:6d} ({count/total*100:5.1f}%)")
 
-        # 4. Remaining → mean_reversion (or low_vol_drift if truly flat)
-        for cs in cluster_scores:
-            if cs["id"] not in assigned:
-                # Check if this remaining cluster is truly low-vol
-                if abs(cs["mom"]) < abs(cluster_scores[by_mom[-1]["id"]]["mom"]) * 0.5 \
-                   and cs["atr"] < sorted([c["atr"] for c in cluster_scores])[1]:
-                    labels[cs["id"]] = "low_vol_drift"
-                else:
-                    labels[cs["id"]] = "mean_reversion"
-                assigned.add(cs["id"])
+        # Disagreement breakdown
+        disagreements = comparison_df[~comparison_df["agreement"]]
+        if len(disagreements) > 0:
+            print(f"\n  Top disagreements (K-Means → Rule-Based):")
+            pairs = (
+                disagreements.groupby(["kmeans_regime", "rule_based_regime"])
+                .size()
+                .sort_values(ascending=False)
+                .head(10)
+            )
+            for (km, rb), count in pairs.items():
+                print(f"    {km:20s} → {rb:20s}: {count:5d}")
 
-        self._centroid_labels = labels
+        # Average confidence
+        avg_conf = comparison_df["kmeans_confidence"].mean()
+        print(f"\n  Average K-Means confidence: {avg_conf:.3f}")
 
-    def _describe_regime(self, label: str, features: Dict[str, float]) -> str:
-        """Generate a one-line description of the current regime."""
-        descriptions = {
-            "momentum_bull": "Strong upward trend — momentum trades favored, size up",
-            "momentum_bear": "Strong downward trend — shorts or cash, no longs",
-            "mean_reversion": "Sideways/oscillating — mean-reversion setups, smaller size",
-            "volatility_spike": "High volatility — wide stops, reduced size, or cash",
-            "low_vol_drift": "Low volume chop — wait for catalyst, no new entries",
+        print(f"\n{'='*70}\n")
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def cmd_train(args: argparse.Namespace) -> int:
+    """Train and save the K-Means regime detector."""
+    detector = RegimeDetector(
+        ticker=args.ticker,
+        n_clusters=args.clusters,
+    )
+
+    if detector.is_model_saved() and not args.force:
+        print(
+            f"[regime_detector] Model already exists at {detector.model_path}. "
+            f"Use --force to retrain."
+        )
+        return 0
+
+    try:
+        metadata = detector.train(
+            months=args.months,
+            interval=args.interval,
+            force=args.force,
+        )
+        print(f"\n[regime_detector] Training complete.")
+        if args.verbose:
+            print(json.dumps(metadata, indent=2, default=str))
+        return 0
+    except Exception as e:
+        print(f"[regime_detector] Training failed: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_classify(args: argparse.Namespace) -> int:
+    """Classify the current market regime."""
+    detector = RegimeDetector(ticker=args.ticker, n_clusters=args.clusters)
+
+    if not detector.load():
+        print(
+            "[regime_detector] No trained model found. Run --train first.",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        result = detector.classify_latest(
+            ticker=args.ticker,
+            interval=args.interval,
+        )
+        output = {
+            "regime": result.regime,
+            "confidence": result.confidence,
+            "cluster_id": result.cluster_id,
+            "timestamp": result.timestamp,
         }
-        return descriptions.get(label, f"Unknown regime: {label}")
-
-    def _get_centroids(self) -> Dict[int, Dict[str, float]]:
-        """Return centroid dict for API response."""
-        if self._kmeans is None:
-            return {}
-        result = {}
-        for i, centroid in enumerate(self._kmeans.cluster_centers_):
-            result[i] = {
-                name: round(float(centroid[j]), 6)
-                for j, name in enumerate(self._feature_names)
-            }
-        return result
-
-    # ── Persistence ──────────────────────────────────────────────────────────
-
-    def _save(self):
-        if not self.model_path:
-            return
-        Path(self.model_path).parent.mkdir(parents=True, exist_ok=True)
-        state = {
-            "k": self.k,
-            "feature_names": self._feature_names,
-            "centroid_labels": self._centroid_labels,
-            "trained_at": self._trained_at.isoformat() if self._trained_at else None,
-            "scaler": self._scaler,
-            "kmeans": self._kmeans,
-        }
-        with open(self.model_path, "wb") as f:
-            pickle.dump(state, f)
-
-    def _load(self) -> bool:
-        path = Path(self.model_path)
-        if not path.exists():
-            return False
-        try:
-            with open(path, "rb") as f:
-                state = pickle.load(f)
-            self.k = state["k"]
-            self._feature_names = state["feature_names"]
-            self._centroid_labels = state.get("centroid_labels", {})
-            self._trained_at = datetime.fromisoformat(state["trained_at"]) if state.get("trained_at") else None
-            self._scaler = state["scaler"]
-            self._kmeans = state["kmeans"]
-            return True
-        except Exception as e:
-            log.warning(f"Failed to load model: {e}")
-            return False
+        print(json.dumps(output, indent=2))
+        return 0
+    except Exception as e:
+        print(f"[regime_detector] Classification failed: {e}", file=sys.stderr)
+        return 1
 
 
-# ── Convenience factory ──────────────────────────────────────────────────────
+def cmd_compare(args: argparse.Namespace) -> int:
+    """Compare K-Means vs rule-based regime classification."""
+    detector = RegimeDetector(ticker=args.ticker, n_clusters=args.clusters)
 
-def create_detector(k: int = 5, model_path: str = "/home/openclaw/data/regime_kmeans.pkl") -> RegimeDetector:
-    """Create a RegimeDetector, loading from disk if available."""
-    return RegimeDetector(k=k, model_path=model_path)
+    if not detector.load():
+        if detector.is_model_saved():
+            print(
+                "[regime_detector] Failed to load model. Run --train first.",
+                file=sys.stderr,
+            )
+            return 1
+        # Auto-train if no model exists
+        print("[regime_detector] No model found. Training first...")
+        detector.train(months=args.months, interval=args.interval)
+
+    try:
+        comparison_df = detector.compare_with_rule_based(
+            months=args.months,
+            interval=args.interval,
+        )
+        detector.print_comparison_summary(comparison_df)
+
+        if args.output:
+            output_path = Path(args.output)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            comparison_df.to_csv(output_path, index=False)
+            print(f"  Comparison data saved to {output_path}")
+
+        return 0
+    except Exception as e:
+        print(f"[regime_detector] Comparison failed: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+        return 1
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="regime_detector",
+        description="K-Means market regime detection for paper trading.",
+    )
+    subparsers = parser.add_subparsers(dest="command", help="Sub-command")
+
+    # --train
+    p_train = subparsers.add_parser("train", help="Train K-Means regime detector")
+    p_train.add_argument("--ticker", default=MARKET_PROXY, help="Market proxy ticker")
+    p_train.add_argument("--months", type=int, default=DEFAULT_LOOKBACK_MONTHS,
+                         help="Lookback months for training")
+    p_train.add_argument("--interval", default=DEFAULT_INTERVAL, help="Bar interval")
+    p_train.add_argument("--clusters", type=int, default=N_CLUSTERS,
+                         help="Number of clusters")
+    p_train.add_argument("--force", action="store_true", help="Force retrain")
+    p_train.add_argument("--verbose", action="store_true", help="Verbose output")
+
+    # --classify
+    p_classify = subparsers.add_parser("classify", help="Classify current regime")
+    p_classify.add_argument("--ticker", default=MARKET_PROXY, help="Ticker to classify")
+    p_classify.add_argument("--clusters", type=int, default=N_CLUSTERS,
+                            help="Number of clusters (must match trained model)")
+    p_classify.add_argument("--interval", default=DEFAULT_INTERVAL, help="Bar interval")
+
+    # --compare
+    p_compare = subparsers.add_parser("compare", help="Compare K-Means vs rule-based")
+    p_compare.add_argument("--ticker", default=MARKET_PROXY, help="Market proxy ticker")
+    p_compare.add_argument("--months", type=int, default=DEFAULT_LOOKBACK_MONTHS,
+                           help="Lookback months")
+    p_compare.add_argument("--interval", default=DEFAULT_INTERVAL, help="Bar interval")
+    p_compare.add_argument("--clusters", type=int, default=N_CLUSTERS,
+                           help="Number of clusters")
+    p_compare.add_argument("--output", help="Save comparison CSV to path")
+
+    args = parser.parse_args(argv)
+
+    if args.command == "train":
+        return cmd_train(args)
+    elif args.command == "classify":
+        return cmd_classify(args)
+    elif args.command == "compare":
+        return cmd_compare(args)
+    else:
+        parser.print_help()
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
