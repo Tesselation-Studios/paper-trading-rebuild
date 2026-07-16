@@ -473,20 +473,15 @@ class TestGetAlpacaPortfolio:
 
 class TestParseDecisions:
     def test_returns_events_with_correct_schema(self, monkeypatch):
-        """Decision rows map to correct event schema."""
+        """Decision rows from trading.decisions map to correct event schema."""
         class FakeRow:
             data = {
-                "agent_id": "trader-kairos",
+                "trader_id": "trader-kairos",
                 "timestamp": "2026-07-15T14:30:00",
                 "action": "BUY",
                 "ticker": "AAPL",
-                "quantity": 10.0,
-                "stop_loss": 145.0,
                 "confidence": 0.75,
                 "thesis": "Strong momentum",
-                "order_status": "submitted",
-                "order_id": "ord-123",
-                "error_reason": None,
             }
             def __getitem__(self, key):
                 return self.data.get(key)
@@ -521,8 +516,6 @@ class TestParseDecisions:
         assert e["decision"]["ticker"] == "AAPL"
         assert e["decision"]["confidence"] == 0.75
         assert e["decision"]["thesis"] == "Strong momentum"
-        assert e["order"]["status"] == "submitted"
-        assert e["order"]["order_id"] == "ord-123"
 
     def test_empty_db_returns_empty_list(self, monkeypatch):
         """No decisions → empty list."""
@@ -622,3 +615,265 @@ class TestApiEndpoints:
             hb = json.loads((state_dir / "heartbeat-state.json").read_text())
             assert hb["equity_kairos"] == 10500.50
             assert hb["cash_kairos"] == 8000.0
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  _normalize_timestamp
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestNormalizeTimestamp:
+    def test_valid_iso(self):
+        """Valid ISO timestamp returned as parsed ISO format."""
+        result = lb._normalize_timestamp("2026-07-15T14:30:00")
+        assert result is not None
+        assert "2026-07-15" in result
+        assert "14:30:00" in result
+
+    def test_journalT_prefix(self):
+        """journalT12:29:00 → normalized to 2026-07-15T12:29:00."""
+        result = lb._normalize_timestamp("journalT12:29:00")
+        assert result is not None
+        assert result == "2026-07-15T12:29:00"
+
+    def test_just_T_time(self):
+        """T14:30:00 format → normalized."""
+        result = lb._normalize_timestamp("T14:30:00")
+        assert result is not None
+        assert result == "2026-07-15T14:30:00"
+
+    def test_none_returns_none(self):
+        """None input returns None."""
+        assert lb._normalize_timestamp(None) is None
+
+    def test_empty_string_returns_none(self):
+        """Empty string returns None."""
+        assert lb._normalize_timestamp("") is None
+
+    def test_garbage_returns_none(self):
+        """Garbage input returns None."""
+        result = lb._normalize_timestamp("garbage")
+        assert result is None
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  API /api/journal endpoint — timestamp normalization
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestApiJournalEndpoint:
+    """Test that /api/journal normalizes timestamps correctly."""
+
+    def test_journal_timestamps_normalized(self, monkeypatch):
+        """journalT timestamps in DB are normalized in the response."""
+        from datetime import datetime
+
+        class FakeRow(dict):
+            def __getitem__(self, key):
+                return self.get(key)
+
+        rows = [
+            FakeRow({"agent_id": "trader-kairos", "timestamp": "journalT16:23:00", "mood": "", "entry": "Test entry 1", "confidence": None}),
+            FakeRow({"agent_id": "trader-stonks", "timestamp": "journalT12:29:00", "mood": "", "entry": "Test entry 2", "confidence": None}),
+            FakeRow({"agent_id": "trader-aldridge", "timestamp": "2026-07-15T17:20:00", "mood": "", "entry": "Test entry 3", "confidence": None}),
+        ]
+
+        class FakeCur:
+            def fetchall(self):
+                return rows
+
+        class FakeConn:
+            def execute(self, sql, params=None):
+                return FakeCur()
+            def close(self):
+                pass
+            def cursor(self, *args, **kwargs):
+                return MagicMock()
+
+        class FakeConnCtx:
+            def __enter__(self, *args):
+                return FakeConn()
+            def __exit__(self, *args, **kwargs):
+                pass
+
+        monkeypatch.setattr(lb, "_db", lambda: FakeConnCtx())
+
+        with lb.app.test_client() as c:
+            r = c.get("/api/journal?limit=10")
+            assert r.status_code == 200
+            data = r.get_json()
+            entries = data.get("entries", [])
+
+            # Should have at least 3 entries
+            assert len(entries) >= 3
+
+            # journalT timestamps should be normalized
+            for e in entries:
+                ts = e.get("timestamp", "")
+                # No raw journalT prefix should leak through
+                assert "journalT" not in str(ts).lower(), f"Raw journalT leaked: {ts}"
+                # Should contain a time portion
+                assert ":" in ts, f"Timestamp has no time portion: {ts}"
+
+    def test_journal_returns_entries(self, monkeypatch):
+        """Basic journal endpoint returns entries array."""
+        class FakeRow(dict):
+            def __getitem__(self, key):
+                return self.get(key)
+
+        class FakeCur:
+            def fetchall(self):
+                return [
+                    FakeRow({"agent_id": "trader-kairos", "timestamp": "2026-07-15T14:30:00", "mood": "happy", "entry": "Test", "confidence": 0.8}),
+                ]
+
+        class FakeConn:
+            def execute(self, sql, params=None):
+                return FakeCur()
+            def close(self):
+                pass
+            def cursor(self, *args, **kwargs):
+                return MagicMock()
+
+        class FakeConnCtx:
+            def __enter__(self, *args):
+                return FakeConn()
+            def __exit__(self, *args, **kwargs):
+                pass
+
+        monkeypatch.setattr(lb, "_db", lambda: FakeConnCtx())
+
+        with lb.app.test_client() as c:
+            r = c.get("/api/journal?limit=5")
+            assert r.status_code == 200
+            data = r.get_json()
+            assert "entries" in data
+            assert len(data["entries"]) == 1
+            assert data["entries"][0]["agent_id"] == "trader-kairos"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  API /api/decisions endpoint — returns data from trading.decisions
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestApiDecisionsEndpoint:
+    """Test that /api/decisions returns properly structured data."""
+
+    def test_decisions_returns_events(self, monkeypatch):
+        """Decisions endpoint returns events with trader/decision keys."""
+        class FakeRow(dict):
+            def __getitem__(self, key):
+                return self.get(key)
+
+        class FakeCur:
+            def fetchall(self):
+                return [
+                    FakeRow({"trader_id": "trader-kairos", "timestamp": "2026-07-15T14:30:00", "action": "BUY", "ticker": "AAPL", "confidence": 0.75, "thesis": "Strong momentum"}),
+                ]
+
+        class FakeConn:
+            def execute(self, sql, params=None):
+                return FakeCur()
+            def close(self):
+                pass
+            def cursor(self, *args, **kwargs):
+                return MagicMock()
+
+        class FakeConnCtx:
+            def __enter__(self, *args):
+                return FakeConn()
+            def __exit__(self, *args, **kwargs):
+                pass
+
+        monkeypatch.setattr(lb, "_db", lambda: FakeConnCtx())
+
+        with lb.app.test_client() as c:
+            r = c.get("/api/decisions?limit=10")
+            assert r.status_code == 200
+            events = r.get_json()
+            assert isinstance(events, list)
+            assert len(events) >= 1
+            e = events[0]
+            assert "trader" in e
+            assert "decision" in e
+            assert e["decision"]["action"] == "BUY"
+            assert e["decision"]["ticker"] == "AAPL"
+            assert e["decision"]["confidence"] == 0.75
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  API /api/traders — benchmark_comparison in response
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestApiTradersBenchmarks:
+    """Test that /api/traders includes benchmark_comparison per trader."""
+
+    def test_traders_include_benchmark(self, monkeypatch):
+        """Each trader card has benchmark_comparison with agent/spy/qoq values."""
+        # Mock _get_benchmark_data to return known values
+        def mock_get_benchmark_data():
+            return {
+                "spy": {"price": 751.94},
+                "qqq": {"price": 719.71},
+                "comparisons": {
+                    "trader-stonks": {
+                        "agent_return": 0.0601,
+                        "spy_return": 0.0197,
+                        "qqq_return": 0.0101,
+                        "spy_excess": 0.0404,
+                        "qqq_excess": 0.05,
+                        "agent_value": 10600.92,
+                        "spy_value": 10197.18,
+                        "period_start": "2026-05-11",
+                        "period_end": "2026-07-15",
+                    },
+                    "trader-aldridge": {
+                        "agent_return": 0.0225,
+                        "spy_return": 0.0197,
+                        "spy_excess": 0.0028,
+                        "agent_value": 10225.49,
+                        "spy_value": 10197.18,
+                    },
+                    "trader-kairos": {
+                        "agent_return": -0.0699,
+                        "spy_return": 0.0197,
+                        "spy_excess": -0.0897,
+                        "agent_value": 9300.56,
+                        "spy_value": 10197.18,
+                    },
+                },
+            }
+
+        monkeypatch.setattr(lb, "_get_benchmark_data", mock_get_benchmark_data)
+        monkeypatch.setattr(lb, "_get_agent_benchmark", lambda agent_id=None: mock_get_benchmark_data()["comparisons"].get(agent_id))
+
+        # Mock other heavy deps to return simple values
+        monkeypatch.setattr(lb, "_get_alpaca_portfolio", lambda c: None)
+        monkeypatch.setattr(lb, "_get_profile_from_db", lambda c: {})
+        monkeypatch.setattr(lb, "_get_trade_stats", lambda c: {"wins": 0, "losses": 0, "total_trades": 0, "win_rate": 0})
+        monkeypatch.setattr(lb, "_get_last_activity", lambda c: "2026-07-15T14:30:00")
+        monkeypatch.setattr(lb, "_get_recent_thought", lambda c: None)
+        monkeypatch.setattr(lb, "_get_agent_score", lambda c: None)
+        monkeypatch.setattr(lb, "_get_paused_status", lambda c: None)
+        monkeypatch.setattr(lb, "_is_option_symbol", lambda s: False)
+        monkeypatch.setattr(lb, "_load_json", lambda p: {})
+
+        with lb.app.test_client() as c:
+            r = c.get("/api/traders")
+            assert r.status_code == 200
+            data = r.get_json()
+            assert "traders" in data
+            assert "benchmarks" in data
+            bm = data["benchmarks"]
+            assert "comparisons" in bm
+            assert len(bm["comparisons"]) >= 2
+
+            for trader in data["traders"]:
+                aid = f"trader-{trader['id']}"
+                bc = trader.get("benchmark_comparison")
+                assert bc is not None, f"{trader['id']} missing benchmark_comparison"
+                assert "agent_return" in bc
+                assert "spy_excess" in bc or "spy_return" in bc
+                if aid == "trader-stonks":
+                    assert bc["agent_return"] == 0.0601
+                    assert bc["spy_excess"] == 0.0404
+                    assert bc["agent_value"] == 10600.92
+                    assert bc["spy_value"] == 10197.18

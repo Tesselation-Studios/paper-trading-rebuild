@@ -50,6 +50,10 @@ install_cron() {
     # nothing happens before 09:30.
     cat >> "$CRON_FILE" <<EOF
 
+# ── Pre-market prompt format validation (9:15 AM ET Mon-Fri) ${CRON_MARKER}
+# Blocks tick production if prompts are broken — see scripts/pre_market_gate.py
+15 9 * * 1-5 cd ${PROJECT_DIR} && python3 scripts/pre_market_gate.py >> ${PROJECT_DIR}/logs/pre_market_gate.log 2>&1 ${CRON_MARKER}
+
 # ── Tick producer: every 5 min Mon-Fri 9-16 (script guards 9:30 start) ${CRON_MARKER}
 0,5,10,15,20,25,30,35,40,45,50,55 9,10,11,12,13,14,15,16 * * 1-5 cd ${PROJECT_DIR} && python3 src/tick_producer.py >> ${PROJECT_DIR}/logs/tick_producer.log 2>&1 ${CRON_MARKER}
 
@@ -59,7 +63,8 @@ EOF
 
     # Install the new crontab
     "${crontab_path}" "$CRON_FILE"
-    echo "✓ Installed tick producer + orchestrator cron entries"
+    echo "✓ Installed pre-market gate + tick producer + orchestrator cron entries"
+    echo "  Pre-market gate log → ${PROJECT_DIR}/logs/pre_market_gate.log"
     echo "  Logs → ${PROJECT_DIR}/logs/tick_producer.log"
     echo "  Logs → ${PROJECT_DIR}/logs/orchestrator.log"
 }
@@ -89,6 +94,7 @@ case "${1:-install}" in
         ;;
     --dry-run)
         echo "── DRY RUN ── Would install:"
+        echo "  * 9:15 AM ET Mon-Fri: pre_market_gate.py (prompt format validation)"
         echo "  * Every 5 min Mon-Fri 9-16: tick_producer.py  (@ :00 offset)"
         echo "  * Every 5 min Mon-Fri 9-16: orchestrator.py   (@ :01 offset)"
         echo "  * Scripts guard against running before 09:30 ET"

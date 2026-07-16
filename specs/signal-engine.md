@@ -52,9 +52,21 @@ Runs every trading tick. Perturbs each param ±ε, replays last N ticks to estim
 
 ## XGBoost Momentum Classifier
 
-Trained Jul 9, 2026. Predicts whether a given momentum signal will produce a winning trade. Accuracy: 78%, ROC-AUC: 0.82. Used as a secondary signal gate — when score < 0.25, position size is halved.
+> **⚠️ NOT DEPLOYED (2026-07-16)**: No trained model file exists in the repository.
+> The 78% accuracy claim was aspirational. The actual model was never persisted
+> after its stated training date (Jul 9, 2026) — no `.pkl`, `.joblib`, or
+> `xgboost` import exists anywhere in the codebase. Kairos's prompt does NOT
+> claim 63% accuracy (contrary to a prior SPEC.md drift note); no live
+> accuracy can be measured because Kairos has zero closed trades with P&L.
+>
+> **TODO**: Either train + persist an XGBoost classifier (`models/xgb_momentum.pkl`)
+> or remove this section and rely solely on the gradient-descent signal engine.
 
-**Top features:** RSI, momentum_composite, volume_ratio, regime_prob_sustainable.
+Originally specified: Predicts whether a given momentum signal will produce a
+winning trade. Target accuracy: 78%, ROC-AUC: 0.82. Intended as a secondary
+signal gate — when score < 0.25, position size is halved.
+
+**Target top features:** RSI, momentum_composite, volume_ratio, regime_prob_sustainable.
 
 ## Relaxed Threshold Presets
 

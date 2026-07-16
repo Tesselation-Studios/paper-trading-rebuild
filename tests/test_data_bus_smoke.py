@@ -28,7 +28,10 @@ try:
 except Exception:
     _BUS_UP = False
 
-pytestmark = pytest.mark.skipif(not _BUS_UP, reason=f"Data bus not running at {DATA_BUS}")
+pytestmark = [
+    pytest.mark.skipif(not _BUS_UP, reason=f"Data bus not running at {DATA_BUS}"),
+    pytest.mark.integration,
+]
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────

@@ -48,6 +48,8 @@ from src.synthesis import (
     evaluate_promotion,
 )
 
+pytestmark = pytest.mark.integration
+
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 

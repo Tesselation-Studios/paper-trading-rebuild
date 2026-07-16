@@ -18,6 +18,8 @@ from src.replay import (
 from src.signals import SignalEngine, SignalParams
 import numpy as np
 
+pytestmark = pytest.mark.integration
+
 
 class TestKairosBacktester:
     """Core backtesting functionality."""

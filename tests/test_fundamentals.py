@@ -11,6 +11,8 @@ from src.fundamentals import (
 )
 from src.aldridge_strategy import ScreenParams, screen_candidates
 
+pytestmark = pytest.mark.integration
+
 
 # ── _safe_float ───────────────────────────────────────────────────────────────
 
