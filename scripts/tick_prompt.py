@@ -271,6 +271,32 @@ def build_signals_board(snapshot: dict) -> str:
     return "\n".join(lines) if lines else "No signals from other traders this tick."
 
 
+def build_trade_context_section(trader_id: str) -> str:
+    """Build comprehensive trade context using trade_context.py.
+
+    Provides enriched performance stats, recent trades, and decisions
+    that supplement the data bus snapshot with historical context.
+    """
+    try:
+        from src.trade_context import build_trade_context
+        agent_id = f"trader-{trader_id}" if not trader_id.startswith("trader-") else trader_id
+        ctx = build_trade_context(agent_id, include_signals=True)
+        # Extract the key sections below the header
+        text = ctx["text"]
+        # Strip the === TRADE CONTEXT header (first 3 lines)
+        lines = text.split("\n")
+        # Keep everything after the mode line
+        start = 0
+        for i, line in enumerate(lines):
+            if line.startswith("Trading Mode:"):
+                start = i + 1
+                break
+        return "\n".join(lines[start:]).strip()
+    except Exception as e:
+        print(f"WARNING: trade context unavailable: {e}", file=sys.stderr)
+        return ""
+
+
 def check_circuit_breaker(trader_id: str) -> dict | None:
     """Check if the trader's circuit breaker is tripped.
 
@@ -380,7 +406,15 @@ def assemble_prompt(trader_id: str, db_path: str | None = None) -> str:
         f"[{j['created_at']}] {j['content']}" for j in journal
     ) if journal else "No recent journal entries."
 
-    # 5. Assemble the full prompt
+    # 5. Trade context enrichment (historical performance, recent trades, recent decisions)
+    trade_context = build_trade_context_section(trader_id)
+    if trade_context:
+        trade_context_block = f"\n### Trade Context (Historical)\n{trade_context}\n"
+        print(f"[tick_prompt] Trade context enriched (+{len(trade_context)} chars)", file=sys.stderr)
+    else:
+        trade_context_block = ""
+
+    # 6. Assemble the full prompt
     injected = f"""
 ## LIVE TRADING TICK — {time.strftime('%Y-%m-%d %H:%M:%S ET')}
 
@@ -395,7 +429,7 @@ def assemble_prompt(trader_id: str, db_path: str | None = None) -> str:
 
 ### Performance
 {performance if performance else 'Performance data unavailable.'}
-
+{trade_context_block}
 ### Other Traders' Signals
 {signals_board}
 
