@@ -653,13 +653,16 @@ def api_traders():
         pv  = portfolio["portfolio_value"] if portfolio else None
         pct = round((pv - STARTING_VALUE) / STARTING_VALUE * 100, 2) if pv else None
 
-        # Tag positions as option or equity
+        # Tag positions as option or equity, compute allocation
         positions = portfolio.get("positions", []) if portfolio else []
         options_exposure = 0.0
         for pos in positions:
             pos["is_option"] = _is_option_symbol(pos.get("ticker", pos.get("symbol", "")))
+            mv = float(pos.get("market_value", 0) or 0)
             if pos["is_option"]:
-                options_exposure += float(pos.get("market_value", 0) or 0)
+                options_exposure += mv
+            # Pre-compute allocation % for frontend display
+            pos["allocation_pct"] = round((mv / pv * 100), 1) if pv and pv > 0 else 0.0
         options_pct = round((options_exposure / pv * 100), 1) if pv and pv > 0 else 0
 
         # Use journal timestamp (most reliable), fall back to heartbeat-state.json, then profile
