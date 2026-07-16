@@ -35,6 +35,9 @@ Endpoints:
   GET  /insiders?symbols=JPM,BAC  (SEC Form 4 insider filings)
   POST /signals            (publish your current read)
   GET  /source-quality    (prediction accuracy per social/news source)
+  GET  /stream/quotes?symbols=AAPL,TSLA  (SSE push)
+  GET  /stream/signals               (SSE push)
+  GET  /stream/all                   (SSE firehose)
   GET  /overnight-sentiment (overnight sentiment delta via computer_overnight_delta)
 
 Usage:
@@ -92,6 +95,18 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 log = logging.getLogger("databus")
+
+# ── Event Bus (push/subscribe model) ──────────────────────────────────────────
+try:
+    from src.event_bus import event_bus, sse_event, sse_keepalive, sse_subscriber_generator
+    _HAS_EVENT_BUS = True
+except ImportError:
+    _HAS_EVENT_BUS = False
+    event_bus = None
+    sse_event = None
+    sse_keepalive = None
+    sse_subscriber_generator = None
+    log.warning("event_bus module not available — SSE streaming disabled")
 
 # ── Graceful shutdown ─────────────────────────────────────────────────────────
 _shutdown_flag = threading.Event()
@@ -2039,6 +2054,7 @@ def health():
         "signal_count": len(_signals_cache),
         "tracked_symbols": len(_tracked_symbols),
         "schedulers": [s.status() for s in _schedulers],
+        "event_bus": event_bus.status() if _HAS_EVENT_BUS else {"available": False},
     })
 
 
@@ -2157,6 +2173,134 @@ def metrics():
 
     lines.append("")  # newline at end
     return Response("\n".join(lines), mimetype="text/plain; version=0.0.4")
+
+
+# ── SSE Streaming (push/subscribe) ────────────────────────────────────────────
+
+@app.route("/stream/quotes")
+def stream_quotes():
+    """GET /stream/quotes?symbols=AAPL,TSLA,...
+
+    SSE endpoint that pushes quote updates in real-time.
+    Clients receive `event: quote` as the data bus refreshes its cache.
+
+    Query params:
+        symbols: comma-separated ticker list. Filters to only those symbols.
+                 Omit to stream all tracked symbols.
+
+    Returns:
+        text/event-stream — SSE events with JSON data.
+
+    Example:
+        curl -N "http://localhost:5000/stream/quotes?symbols=AAPL,TSLA"
+    """
+    if not _HAS_EVENT_BUS:
+        return jsonify({"error": "Event bus not available"}), 503
+
+    symbols_raw = request.args.get("symbols", "").strip()
+    if not symbols_raw:
+        target_symbols = set(_tracked_symbols)
+    else:
+        target_symbols = set(s.strip().upper() for s in symbols_raw.split(",") if s.strip())
+
+    def quote_filter(event: dict) -> bool:
+        """Only pass through events containing at least one target symbol."""
+        for key in event:
+            if key.startswith("_"):
+                continue
+            if key.upper() in target_symbols:
+                return True
+        syms = event.get("symbols") or []
+        if isinstance(syms, list):
+            return any(s in target_symbols for s in syms)
+        return False
+
+    def generate():
+        # Send initial snapshot of current cached quotes
+        snapshot = {}
+        for sym in target_symbols:
+            entry = _cache.get(f"quote:{sym}")
+            if entry is not None:
+                snapshot[sym] = entry
+        yield sse_event("snapshot", {"quotes": snapshot, "symbols": sorted(target_symbols)})
+        yield from sse_subscriber_generator(event_bus, "quotes", filter_fn=quote_filter)
+
+    return Response(
+        generate(),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.route("/stream/signals")
+def stream_signals():
+    """GET /stream/signals
+
+    SSE endpoint that pushes trader signal updates in real-time.
+    Clients receive `event: signal` whenever any trader publishes a read.
+
+    Returns:
+        text/event-stream — SSE events with JSON data.
+    """
+    if not _HAS_EVENT_BUS:
+        return jsonify({"error": "Event bus not available"}), 503
+
+    def generate():
+        yield from sse_subscriber_generator(event_bus, "signals")
+
+    return Response(
+        generate(),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.route("/stream/all")
+def stream_all():
+    """GET /stream/all
+
+    SSE firehose — pushes all event types (quotes, signals, macro, news,
+    fear_greed) in real-time.
+
+    Returns:
+        text/event-stream — SSE events of mixed types with JSON data.
+    """
+    if not _HAS_EVENT_BUS:
+        return jsonify({"error": "Event bus not available"}), 503
+
+    def generate():
+        import threading as _thr
+        topics = ["quotes", "signals", "macro", "news", "fear_greed"]
+        generators = [
+            sse_subscriber_generator(event_bus, t)
+            for t in topics
+        ]
+        # Round-robin yield from all generators
+        idx = 0
+        while True:
+            try:
+                yield next(generators[idx])
+            except StopIteration:
+                break
+            idx = (idx + 1) % len(generators)
+
+    return Response(
+        generate(),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # ── Quotes ────────────────────────────────────────────────────────────────────
@@ -3471,6 +3615,10 @@ def signals():
                 if not (s["agent"] == agent and s["ticker"] == signal_data["ticker"])
             ]
             _signals_cache.append(signal_data)
+
+        # Publish to SSE subscribers
+        if _HAS_EVENT_BUS:
+            event_bus.publish("signals", {"event_type": "signal_update", **signal_data})
 
         log.info("Signal posted: agent=%s ticker=%s bias=%s conviction=%.2f",
                  agent, signal_data["ticker"], signal_data["bias"], signal_data["conviction"])
@@ -5612,6 +5760,9 @@ def _scheduled_fetch_quotes():
     if data:
         mapped = {f"quote:{s}": d for s, d in data.items()}
         _cache.set_multi(mapped)
+        # Publish to SSE subscribers
+        if _HAS_EVENT_BUS:
+            event_bus.publish("quotes", {"event_type": "quote_update", "symbols": sorted(data.keys()), **data})
         # Enqueue DB persistence
         if _write_queue:
             now_iso = datetime.now().isoformat()
@@ -5663,6 +5814,9 @@ def _scheduled_fetch_news():
     data = _fetch_alpaca_news(symbol=None, limit=20)
     if data:
         _cache.set("news:all:20", data)
+        # Publish to SSE subscribers
+        if _HAS_EVENT_BUS:
+            event_bus.publish("news", {"event_type": "news_update", "articles": data})
         # Enqueue DB persistence
         if _write_queue:
             now_iso = datetime.now().isoformat()
@@ -5834,12 +5988,16 @@ def _scheduled_fetch_macro():
         if fred_data and "error" not in fred_data:
             ls_data["fred"] = fred_data.get("indicators", {})
         _cache.set("macro:latest", ls_data)
+        if _HAS_EVENT_BUS:
+            event_bus.publish("macro", {"event_type": "macro_update", **ls_data})
         log.info("Macro cached via LoneStarOracle + FRED")
         return
     # Fall back to FRED only
     data = _fetch_fred_macro()
     if data and "error" not in data:
         _cache.set("macro:latest", data)
+        if _HAS_EVENT_BUS:
+            event_bus.publish("macro", {"event_type": "macro_update", **data})
         log.info("FRED macro cached: %d indicators (yields=%s)",
                  len(data.get("indicators", {})),
                  "yes" if "yields" in data else "no")
@@ -5864,6 +6022,8 @@ def _scheduled_fetch_fear_greed():
     data = _fetch_fear_greed()
     if data and "error" not in data:
         _cache.set("fear_greed:latest", data)
+        if _HAS_EVENT_BUS:
+            event_bus.publish("fear_greed", {"event_type": "fear_greed_update", **data})
         log.debug("Fear & Greed Index cached: value=%s (%s)",
                  data.get("value"), data.get("classification"))
 
@@ -6138,7 +6298,15 @@ def _create_schedulers() -> List[Scheduler]:
         Scheduler("risk", INTERVALS["risk"], _scheduled_fetch_risk),
         Scheduler("technical_scan", INTERVALS["technical_scan"], _scheduled_fetch_technical_scan),
         # Fundamentals and options are fetched on-demand (expensive, low frequency)
+        # Event bus GC: prune stale SSE subscribers every 5 minutes
+        Scheduler("event_bus_gc", {"market": 300, "off": 300}, _scheduled_event_bus_gc),
     ]
+
+
+def _scheduled_event_bus_gc():
+    """Prune stale SSE subscribers."""
+    if _HAS_EVENT_BUS:
+        event_bus.gc_stale()
 
 
 
@@ -7169,6 +7337,9 @@ def main():
     log.info("  GET  /social?source=bluesky|stocktwits|all")
     log.info("  GET  /signals")
     log.info("  POST /signals")
+    log.info("  GET  /stream/quotes?symbols=AAPL,TSLA  (SSE push)")
+    log.info("  GET  /stream/signals               (SSE push)")
+    log.info("  GET  /stream/all                   (SSE firehose)")
     log.info("  GET  /source-quality    (prediction accuracy per source)")
     log.info("  GET  /percentile        (percentile rankings by metric)")
     log.info("  GET  /ml-signal?symbol=AAPL")

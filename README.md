@@ -217,3 +217,16 @@ Source of truth: `~/.hermes/homelab.env`
 | **Trader Heartbeat** | Hermes cron | Every 2 min |
 | **Overnight Learning** | Hermes cron | 3 AM ET |
 | **Dashboard** | `http://192.168.1.41:5002` | Live |
+
+---
+
+## Documentation
+
+| Doc | Covers |
+|-----|--------|
+| **[ARCHITECTURE.md](docs/ARCHITECTURE.md)** | System overview, data flow, components, hardware, repository layout |
+| **[API.md](docs/API.md)** | Data bus REST API — all 42 endpoints with parameters and response schemas |
+| **[DB_SCHEMA.md](docs/DB_SCHEMA.md)** | Postgres schema — tables, constraints, indexes, common queries |
+| **[RUNBOOK.md](docs/RUNBOOK.md)** | Operational runbook — incident response for gateway, Postgres, trader crashes |
+| **[SPEC.md](SPEC.md)** | Master specification — architecture, invariants, system health |
+| **[specs/](specs/)** | Detailed sub-specs — 19 files covering signal engine, traders, validation, etc. |
