@@ -167,7 +167,11 @@ def build_quotes_table(snapshot: dict, symbols: list[str]) -> str:
 
 
 def build_market_context(snapshot: dict) -> str:
-    """Build market context section."""
+    """Build market context section.
+
+    Per SPEC #149: Uses K-Means regime detection (10-feature clustering)
+    with fallback to the rule-based data bus regime if the model is unavailable.
+    """
     parts = []
 
     # Fear & Greed
@@ -177,12 +181,38 @@ def build_market_context(snapshot: dict) -> str:
         fg_class = fg.get("classification", "?")
         parts.append(f"Fear & Greed: {fg_val} ({fg_class})")
 
-    # Regime
-    regime = snapshot.get("regime", {})
-    if regime and "error" not in regime:
-        regime_label = regime.get("regime", regime.get("label", "?"))
-        regime_conf = regime.get("confidence", "?")
-        parts.append(f"Market Regime: {regime_label} (confidence: {regime_conf})")
+    # Regime — K-Means detection (SPEC #149) with data bus fallback
+    regime_label: str = "?"
+    regime_conf: str = "?"
+    regime_source: str = ""
+
+    # Try K-Means regime detector first
+    try:
+        from src.regime_detector import RegimeDetector
+        detector = RegimeDetector()
+        if detector.load():
+            result = detector.classify_latest()
+            regime_label = result.regime
+            regime_conf = f"{result.confidence:.2f}"
+            regime_source = " (K-Means)"
+    except Exception as e:
+        print(
+            f"[tick_prompt] K-Means regime detection failed: {e}. "
+            f"Falling back to data bus.\n",
+            file=sys.stderr,
+        )
+
+    # Fallback: data bus rule-based regime
+    if not regime_source:
+        regime = snapshot.get("regime", {})
+        if regime and "error" not in regime:
+            regime_label = regime.get("regime", regime.get("label", "?"))
+            regime_conf = str(regime.get("confidence", "?"))
+            regime_source = " (rule-based)"
+
+    parts.append(
+        f"Market Regime: {regime_label} (confidence: {regime_conf}){regime_source}"
+    )
 
     # VIX
     quotes = snapshot.get("quotes", {})
@@ -271,6 +301,33 @@ def check_circuit_breaker(trader_id: str) -> dict | None:
         return None
 
 
+def _validate_prompt_format(trader_id: str, template: str) -> list[str]:
+    """Validate prompt template format.
+
+    Uses the same checks as scripts/validate_prompt_format.py:
+    - Required sections: decision, conviction, rationale
+    - Minimum prompt size: 200 chars
+
+    Returns list of error strings; empty list if valid.
+    """
+    errors = []
+
+    # Check required sections
+    required_sections = ["decision", "conviction", "rationale"]
+    for section in required_sections:
+        if section.lower() not in template.lower():
+            errors.append(f"Prompt missing required section: '{section}'")
+
+    # Check minimum size
+    min_size = 200
+    if len(template.strip()) < min_size:
+        errors.append(
+            f"Prompt too short: {len(template.strip())} chars (min {min_size})"
+        )
+
+    return errors
+
+
 def assemble_prompt(trader_id: str, db_path: str | None = None) -> str:
     """Assemble the complete trading prompt for one tick."""
     # 0. Circuit breaker guard — skip if paused
@@ -290,6 +347,15 @@ def assemble_prompt(trader_id: str, db_path: str | None = None) -> str:
         print(f"FATAL: prompt template not found: {prompt_path}", file=sys.stderr)
         sys.exit(1)
     template = prompt_path.read_text()
+
+    # 1a. Format validation gate — verify prompt template is intact before tick
+    format_errors = _validate_prompt_format(trader_id, template)
+    if format_errors:
+        for err in format_errors:
+            print(f"FORMAT WARNING [{trader_id}]: {err}", file=sys.stderr)
+        # WARNING only during live ticks — the pre-market cron gate (9:15 AM ET)
+        # is the hard block. During trading hours we log and continue to avoid data loss.
+        # The pre-market gate writes state/.pre_market_blocked if validation fails.
 
     # 2. Fetch live state from data bus
     snapshot = fetch_tick_snapshot()

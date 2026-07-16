@@ -3,7 +3,7 @@
 > **META-SPEC**: [ai-project-system v0.22](https://github.com/openclaw/openclaw/blob/main/docs/ai-project-system/META-SPEC.md)
 > **Repo**: `Tesselation-Studios/paper-trading-rebuild`
 > **Status**: Built + evolving — 3 traders live, Postgres native, webhook comms active
-> **Updated**: 2026-07-09
+> **Updated**: 2026-07-15
 >
 > This file is the **master index**. Each subsystem has its own spec in `specs/` with
 > implementation details. Details here are architecture-wide — everything else lives downstream.
@@ -170,9 +170,9 @@ gh issue create --repo Tesselation-Studios/paper-trading-rebuild --title "..." -
 
 ---
 
-## Current State Assessment (2026-07-10)
+## Current State Assessment (2026-07-15)
 
-> This section tracks drift between the SPEC's aspirational architecture and the live running system. Updated by Fusion Router review on 2026-07-10.
+> This section tracks drift between the SPEC's aspirational architecture and the live running system. Updated by Fusion Router review on 2026-07-10. Last updated 2026-07-15 (issue #148 resolution).
 
 ### 🔴 Critical Drift
 
@@ -180,14 +180,20 @@ gh issue create --repo Tesselation-Studios/paper-trading-rebuild --title "..." -
 |---|---|---|
 | "LLM never touches a tool during a trading tick" — pre-assembled prompt | AGENTS.md lists 4+ tool calls per tick (`curl`, `python3 skill_*.py`, etc.) | 2-7 min per tick wasted on tool execution; P99 timeout risk |
 | Drawdown >15% → knockout, score=0 | Aldridge at 75% max DD, still trading | Circuit breaker not implemented — knocked-out trader still positions |
-| `prompts/{trader}.txt` is prompt source | `~/projects/trading-agent-prompts/{trader}/AGENTS.md` is source | Path mismatch; prompts live outside the repo |
+
 | JSON schema: `decision`/`conviction`/`rationale` | Live uses `action`/`confidence`/`reasoning` | Incompatible parsers; downstream tools read wrong fields |
+
+### ✅ Resolved (2026-07-15)
+
+| SPEC Claim | Resolution |
+|---|---|
+| `prompts/{trader}.txt` is prompt source | **Fixed (#148)** — Canonical `prompts/{kairos,aldridge,stonks}.txt` templates now live in the repo with `{regime}`, `{signal_report}`, `{portfolio_state}`, `{journal_entries}` placeholders. Templates use `decision`/`conviction`/`rationale` schema (aligned with #147). `scripts/sync_prompts.sh` provides backward compat mirror to `trading-agent-prompts/` during migration. |
 
 ### 🟡 Significant Drift
 
 | SPEC Claim | Live State | Impact |
 |---|---|---|
-| XGBoost accuracy 78% | Kairos prompt says 63% | Stale model or stale prompt — can't tell which |
+| ~~XGBoost accuracy 78%~~ | ✅ Resolved 2026-07-16 — model never deployed (no `.pkl` file); 63% was a false attribution (Kairos prompt doesn't mention it) | Moved to Not Yet Deployed |
 | K-Means regime with 10 features | Rule-based `TRENDING_UP/DOWN/HIGH_VOL/MEAN_REVERTING` | K-means not deployed; old classifier still running |
 | Multi-date walk-forward sweep | Single-date sweep with synthetic data fallback | Prompt overfitting; synthetic data is noise |
 | Pre-market format validation blocks open | No evidence this gate is active | Broken prompts could hit production |
@@ -198,7 +204,8 @@ gh issue create --repo Tesselation-Studios/paper-trading-rebuild --title "..." -
 |---|---|---|
 | Virtual traders (shadow + rotation) | Not deployed — tables don't exist | P2 |
 | K-Means regime detector (`regime_detector.py`) | Spec defined, not deployed | P3 |
-| BarLoader + backfill pipeline | ✅ FIXED: smarter date-range fetch + data distribution validator + balance flag | P1 |
+| BarLoader + backfill pipeline | Parquet data severely lopsided (61K rows on one day, 2 on others) | P1 |
+| XGBoost momentum classifier | Spec defines 78% accuracy in `specs/signal-engine.md`, no model file exists in repo | P2 |
 | CostModel in replay | Not implemented | P2 |
 
 ### Live System Health
@@ -209,9 +216,11 @@ gh issue create --repo Tesselation-Studios/paper-trading-rebuild --title "..." -
 | **Aldridge** | — | 50% | **75%** | 🔴 Should be knocked out |
 | **Stonks** | $0 | 0% | 13.2% | 🔴 Not trading at all |
 
-### ✅ Prompt Bloat Risk — Mitigated (#175)
-
-Nightly synthesis writes to `reports/` directory, NOT AGENTS.md. CI enforces size limits via `scripts/check_agent_file_sizes.py —ci —all`. `promote_virtual_to_live.py` blocks promotion if AGENTS.md exceeds 8K chars. All files currently under 8K.
+|### ⚠️ Active Risk: Prompt Bloat
+|
+|Nightly synthesis is appended into AGENTS.md (~80 lines/night). Current files are ~10K chars — approaching OpenClaw's 12K hard limit. Mid-file instructions will silently be truncated. Synthesis MUST be moved to a separate file or DB.
+|
+|**Fix applied (#175):** `scripts/separate_synthesis_output.py` is a guard script that runs pre-synthesis to check all AGENTS.md files for embedded synthesis output, extract it to `reports/`, and report file sizes. Run it before any nightly synthesis job. Use `--guard` flag in CI/cron to fail-fast if any file exceeds 10K chars.
 
 ### Action Items from Fusion Router
 

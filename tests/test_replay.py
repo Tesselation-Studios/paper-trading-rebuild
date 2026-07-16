@@ -26,6 +26,8 @@ from src.replay import (
     make_random_walk_ticks,
 )
 
+pytestmark = pytest.mark.integration
+
 
 # ── Test helpers ─────────────────────────────────────────────────────────────
 

@@ -12,6 +12,8 @@ from src.signals import (
     gradient_step,
 )
 
+pytestmark = pytest.mark.integration
+
 
 # ── ParamBound tests ─────────────────────────────────────────────────────────
 

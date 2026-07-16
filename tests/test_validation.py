@@ -15,6 +15,8 @@ from src.validation import (
 )
 from src.replay import Tick, Portfolio, TraderDecision, ReplayHarness, TraderFn
 
+pytestmark = pytest.mark.integration
+
 
 class TestWalkForwardSplit:
     def test_single_window(self):

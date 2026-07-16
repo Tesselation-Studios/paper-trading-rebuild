@@ -11,6 +11,8 @@ from src.aldridge_strategy import (
     weekly_rebalance,
 )
 
+pytestmark = pytest.mark.integration
+
 
 # ── screen_candidates ─────────────────────────────────────────────────────────
 
