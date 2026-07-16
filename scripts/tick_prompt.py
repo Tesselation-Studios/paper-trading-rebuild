@@ -271,6 +271,33 @@ def check_circuit_breaker(trader_id: str) -> dict | None:
         return None
 
 
+def _validate_prompt_format(trader_id: str, template: str) -> list[str]:
+    """Validate prompt template format.
+
+    Uses the same checks as scripts/validate_prompt_format.py:
+    - Required sections: decision, conviction, rationale
+    - Minimum prompt size: 200 chars
+
+    Returns list of error strings; empty list if valid.
+    """
+    errors = []
+
+    # Check required sections
+    required_sections = ["decision", "conviction", "rationale"]
+    for section in required_sections:
+        if section.lower() not in template.lower():
+            errors.append(f"Prompt missing required section: '{section}'")
+
+    # Check minimum size
+    min_size = 200
+    if len(template.strip()) < min_size:
+        errors.append(
+            f"Prompt too short: {len(template.strip())} chars (min {min_size})"
+        )
+
+    return errors
+
+
 def assemble_prompt(trader_id: str, db_path: str | None = None) -> str:
     """Assemble the complete trading prompt for one tick."""
     # 0. Circuit breaker guard — skip if paused
@@ -290,6 +317,15 @@ def assemble_prompt(trader_id: str, db_path: str | None = None) -> str:
         print(f"FATAL: prompt template not found: {prompt_path}", file=sys.stderr)
         sys.exit(1)
     template = prompt_path.read_text()
+
+    # 1a. Format validation gate — verify prompt template is intact before tick
+    format_errors = _validate_prompt_format(trader_id, template)
+    if format_errors:
+        for err in format_errors:
+            print(f"FORMAT WARNING [{trader_id}]: {err}", file=sys.stderr)
+        # WARNING only during live ticks — the pre-market cron gate (9:15 AM ET)
+        # is the hard block. During trading hours we log and continue to avoid data loss.
+        # The pre-market gate writes state/.pre_market_blocked if validation fails.
 
     # 2. Fetch live state from data bus
     snapshot = fetch_tick_snapshot()
