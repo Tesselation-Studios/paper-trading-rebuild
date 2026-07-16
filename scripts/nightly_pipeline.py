@@ -9,6 +9,7 @@ Chains:
   4. Phase 2: LLM validation on top K candidates (expensive)
   5. Promote winner (git branch + sweep_results table)
   6. Push summary card to Canvas
+  7. (Optional) 7-Night Trend Card — weekly variant performance trends
 
 Usage:
     python3 scripts/nightly_pipeline.py                                          # defaults
@@ -564,6 +565,8 @@ def nightly_pipeline(
     skip_llm: bool = False,
     # General
     dry_run: bool = False,
+    # Trend card
+    trend_card: bool = False,
 ) -> Dict[str, Any]:
     """Run the full nightly optimization pipeline.
 
@@ -585,6 +588,7 @@ def nightly_pipeline(
         max_llm_runs: Max LLM runs per trader.
         skip_llm: Skip LLM phase entirely (signal-only).
         dry_run: If True, skip git operations and DB writes.
+        trend_card: If True, push a 7-night trend card to Canvas (weekly).
 
     Returns:
         Dict with pipeline results for reporting.
@@ -780,6 +784,33 @@ def nightly_pipeline(
 
     step_canvas_card(result, pipeline_elapsed, dry_run=dry_run)
 
+    # ═══════════════════════════════════════════════════════════════════
+    # STEP 7: 7-Night Trend Card (weekly — Mondays only)
+    # ═══════════════════════════════════════════════════════════════════
+    if trend_card:
+        try:
+            from scripts.nightly_trend_card import (
+                get_7_night_data,
+                generate_markdown,
+                push_to_canvas as push_trend,
+            )
+
+            print(f"\n{'='*60}")
+            print("  STEP 7/7: 7-Night Trend Card")
+            print(f"{'='*60}")
+
+            trend_data = get_7_night_data(trader_id=None, nights=7)
+            if trend_data:
+                trend_content = generate_markdown(trend_data)
+                push_trend(trend_content, dry_run=dry_run)
+                result["trend_card"] = "pushed"
+            else:
+                print("[nightly] ⚠️  No trend data — skipping trend card")
+                result["trend_card"] = "no_data"
+        except Exception as e:
+            print(f"[nightly] ⚠️  Trend card failed: {e}")
+            result["trend_card"] = f"error: {e}"
+
     # ── Final summary ─────────────────────────────────────────────────
     print(f"\n{'='*60}")
     print(f"  NIGHTLY PIPELINE COMPLETE")
@@ -905,6 +936,10 @@ Examples:
         "--slippage", type=float, default=10.0,
         help="Slippage in basis points (default: 10.0)",
     )
+    general.add_argument(
+        "--trend-card", action="store_true",
+        help="Push a 7-night trend card to Canvas after pipeline (weekly)",
+    )
 
     args = parser.parse_args()
 
@@ -927,6 +962,7 @@ Examples:
         max_llm_runs=args.max_llm_runs,
         skip_llm=args.skip_llm,
         dry_run=args.dry_run,
+        trend_card=args.trend_card,
     )
 
     # Exit non-zero if no winners
