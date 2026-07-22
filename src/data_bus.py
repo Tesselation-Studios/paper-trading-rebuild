@@ -358,7 +358,7 @@ RATE_LIMIT_QUOTES_PER_MIN = _rate_cfg.get("quotes_per_min", 200)
 RATE_LIMIT_CRYPTO_PER_MIN = _rate_cfg.get("crypto_per_min", 200)
 
 # FinBERT service (env vars used directly; YAML provides overrides)
-FINBERT_HOST = os.getenv("FINBERT_HOST", _endpoints_cfg.get("finbert", {}).get("host", "192.168.1.237"))
+FINBERT_HOST = os.getenv("FINBERT_HOST", _endpoints_cfg.get("finbert", {}).get("host", "legend-of-macs.local"))
 FINBERT_PORT = int(os.getenv("FINBERT_PORT", _endpoints_cfg.get("finbert", {}).get("port", 5004)))
 FINBERT_URL = f"http://{FINBERT_HOST}:{FINBERT_PORT}"
 
@@ -6180,7 +6180,7 @@ def _run_hmm_retrain():
         
         _retrain_state['step'] = 'uploading'
         log.info('[retrain-hmm] Step 2: Uploading to Mac GPU worker...')
-        ml_host = os.getenv('ML_ENDPOINT_URL', 'http://192.168.1.237:5005')
+        ml_host = os.getenv('ML_ENDPOINT_URL', 'http://legend-of-macs.local:5005')
         
         # Upload via subprocess curl
         upload_cmd = [
