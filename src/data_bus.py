@@ -2413,10 +2413,18 @@ def sentiment():
     if cached is not None:
         return jsonify({"symbol": symbol, "sentiment": cached, "source": "cache"})
 
-    # Cache miss — try live analysis
-    # First try fetching news headlines for better keyword analysis
+    # Cache miss — try live analysis. Only real news headlines produce a
+    # meaningful sentiment signal — running FinBERT on the bare ticker
+    # string (e.g. just "NVDA") is not analysis, it's noise dressed up as a
+    # confident-looking score (verified: a fake ticker with zero real news
+    # still returned compound=0.95). If no headlines are cached, report
+    # honestly that sentiment is unavailable rather than fabricating one.
+    # Only genuinely ticker-specific cache keys — "news:all:20" is a shared,
+    # non-ticker-specific bucket; using it here was the actual root cause of
+    # the identical-score bug (every ticker with no specific news fell
+    # through to the same generic headlines, producing the same score).
     news_analysis = None
-    for news_key in [f"news:{symbol}:10", f"news:{symbol}:5", "news:all:20"]:
+    for news_key in [f"news:{symbol}:10", f"news:{symbol}:5"]:
         news_text = _cache.get(news_key, TTL["news"])
         if news_text and isinstance(news_text, list):
             headlines = [n.get("headline", "") for n in news_text[:5] if n.get("headline", "")]
@@ -2424,7 +2432,14 @@ def sentiment():
                 combined = " ".join(headlines)
                 news_analysis = _fetch_sentiment_via_finbert(combined, ticker=symbol)
                 break
-    result = news_analysis or _fetch_sentiment_via_finbert(symbol, symbol)
+    if news_analysis is None:
+        return jsonify({
+            "symbol": symbol,
+            "sentiment": None,
+            "source": "no_news",
+            "error": "no cached news headlines for this ticker — sentiment requires real text, not fabricated from the ticker symbol alone",
+        }), 200
+    result = news_analysis
     if result:
         # Normalize to VADER-compatible format (compound/positive/negative/neutral)
         # FinBERT returns {sentiment_score, label, confidence} which is a
@@ -5295,9 +5310,22 @@ if _mcp_tools_enabled():
             if prae_cached is not None:
                 result["praesentire"] = prae_cached
             return result
-        # Live fetch
-        result = _fetch_sentiment_via_finbert(sym, sym)
+        # Live fetch — gather news headlines first for meaningful FinBERT analysis.
+        # Sending a bare ticker name produces zero scores. Always try to find text.
+        news_text = None
+        news_source = "direct"
+        for news_key in [f"news:{sym}:10", f"news:{sym}:5", "news:all:20"]:
+            cached_news = _cache.get(news_key, TTL["news"])
+            if cached_news and isinstance(cached_news, list):
+                headlines = [n.get("headline", "") for n in cached_news[:5] if n.get("headline", "")]
+                if headlines:
+                    news_text = " ".join(headlines)
+                    news_source = "headlines"
+                    break
+        text_to_analyze = news_text if news_text else sym
+        result = _fetch_sentiment_via_finbert(text_to_analyze, ticker=sym)
         if result:
+            result["analysis_text_source"] = news_source
             _cache.set(cache_key, result)
             output = {"symbol": sym, "sentiment": result, "source": "live"}
             # Try live Praesentire
