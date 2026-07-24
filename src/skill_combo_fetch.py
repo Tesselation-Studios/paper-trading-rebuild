@@ -38,6 +38,8 @@ import pandas_ta as ta
 import requests
 from dotenv import load_dotenv
 
+from src import rate_limiter
+
 
 # ---------------------------------------------------------------------------
 # Env loading — per-account first, global fallback
@@ -476,10 +478,15 @@ def fetch_fundamentals(tickers: list) -> dict:
     Fetch company fundamentals from Alpha Vantage.
 
     Respects the 5-req/min rate limit by using max 5 parallel workers and a
-    small stagger. Alpha Vantage free tier = 25 req/day, so this flag should
-    be used sparingly.
+    small stagger. Alpha Vantage free tier = 25 req/day — tracked in
+    shared/rate_limits.json (rate_limiter.py) and checked PER TICKER before
+    each real request, so we stop making doomed calls once the daily budget
+    is gone instead of silently getting empty results back.
 
-    Returns dict keyed by ticker.
+    Returns dict keyed by ticker. Tickers skipped for being over the daily
+    limit get {"rate_limited": True} instead of real fundamentals or being
+    silently omitted — callers need to tell "no data" apart from "budget's
+    gone for today" (2026-07-24: previously indistinguishable).
     """
     api_key = os.getenv("ALPHA_VANTAGE_API_KEY") or os.getenv("ALPHA_VANTAGE_KEY")
     if not api_key:
@@ -490,13 +497,22 @@ def fetch_fundamentals(tickers: list) -> dict:
           file=sys.stderr)
 
     result = {}
+    fetchable = []
+    for t in tickers:
+        allowed, remaining = rate_limiter.check_and_increment("alpha_vantage", limit=25)
+        if allowed:
+            fetchable.append(t)
+        else:
+            print(f"[combo_fetch] {t}: Alpha Vantage daily limit reached, skipping", file=sys.stderr)
+            result[t] = {"rate_limited": True, "resets_at": rate_limiter.resets_at()}
+
     # Max 5 concurrent to stay under Alpha Vantage's 5 req/min rate limit
     with ThreadPoolExecutor(max_workers=5) as ex:
         # Stagger submissions slightly to avoid burst rate-limiting
         futures = {}
-        for i, t in enumerate(tickers):
+        for i, t in enumerate(fetchable):
             futures[ex.submit(_fetch_single_fundamental, t, api_key)] = t
-            if i < len(tickers) - 1:
+            if i < len(fetchable) - 1:
                 time.sleep(0.25)  # 250ms stagger
 
         for f in as_completed(futures):

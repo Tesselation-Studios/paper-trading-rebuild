@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 .env
 *.db
+shared/rate_limits.json
 dist/
 *.egg-info/
 .venv/

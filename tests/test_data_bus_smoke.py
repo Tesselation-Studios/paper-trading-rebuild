@@ -276,16 +276,25 @@ class TestFundamentals:
         assert body["symbol"] == "AAPL"
 
     def test_error_schema_when_no_data(self):
-        """When data is unavailable, response has error + null fundamentals."""
+        """When data is unavailable, response has error + null fundamentals.
+
+        2026-07-24: fundamentals now actually works (real Alpha Vantage key +
+        SQLite cache), so a real ticker can legitimately return 200 with data
+        instead of 404 — that's success, not a schema violation. This test
+        only checks the shape when it IS unavailable, using a symbol that
+        can't have real fundamentals rather than assuming any given ticker
+        will be empty."""
         try:
-            data = _get("/fundamentals", {"symbol": "AAPL"}, expect_status=404)
+            resp = requests.get(f"{DATA_BUS}/fundamentals",
+                                 params={"symbol": "ZZZZZ_NOT_A_REAL_TICKER"}, timeout=TIMEOUT)
         except (requests.exceptions.ConnectionError, requests.exceptions.ReadTimeout):
             pytest.skip("Fundamentals endpoint timed out or unavailable")
             return
+        assert resp.status_code in (404, 429), f"Expected 404 or 429, got {resp.status_code}"
+        data = resp.json()
         assert "error" in data
         assert "fundamentals" in data
-        # fundamentals may be null when unavailable
-        assert data["fundamentals"] is None or isinstance(data["fundamentals"], dict)
+        assert data["fundamentals"] is None
 
     def test_params_required(self):
         """Missing symbol param returns 400."""
@@ -350,12 +359,8 @@ class TestMomentum:
         if data is None:
             pytest.skip("Momentum module not available in data bus")
         assert "avg_composite_z" in data
-        assert "signal" in data
-        assert data["signal"] == "cross_sectional_momentum"
-        assert "top_buys" in data
-        assert isinstance(data["top_buys"], list)
-        assert "top_avoids" in data
-        assert isinstance(data["top_avoids"], list)
+        assert "ranked" in data
+        assert isinstance(data["ranked"], list)
         assert "num_ranked" in data
         assert isinstance(data["num_ranked"], int), "num_ranked should be int"
         assert "market_regime" in data

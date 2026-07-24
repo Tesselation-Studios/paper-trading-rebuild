@@ -109,6 +109,7 @@ signal.signal(signal.SIGTERM, _on_signal)
 from dotenv import load_dotenv
 load_dotenv(Path.home() / ".openclaw" / ".env", override=True)
 from src.db import dual_writer
+from src import rate_limiter
 
 # ── Reflection cron (end-of-day analysis + GET /self/stats) ────────────────
 try:
@@ -1688,6 +1689,38 @@ def _sqlite_get_congress_trades(limit: int = 20) -> List[dict]:
     return []  # Placeholder — congress data not in cache.db schema yet
 
 
+def _ensure_cache_tables(conn):
+    """Create cache.db tables if they don't exist yet.
+
+    2026-07-24: cache.db has sat empty since this repo's rebuild — the
+    original schema-init function never got ported (see
+    Tesselation-Studios/paper-trading-teams's data_bus.py for the archived
+    version, which also had prices/news/sentiment/watchlist tables — those
+    aren't wired to any read/write path in this repo currently, so left out
+    here rather than creating dead tables). Scoped to what's actually
+    used: fundamentals (per-ticker, matches _db_read/_sqlite_persist's
+    existing column expectations) and macro (global snapshots, JSON blob —
+    FRED/LoneStarOracle's field set is wide and shifts, not worth a rigid
+    per-field schema for a cache table)."""
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS fundamentals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker TEXT NOT NULL,
+            pe_ratio REAL, eps REAL, dividend_yield REAL, analyst_target REAL,
+            market_cap INTEGER, description TEXT,
+            debt_ratio REAL, roe REAL,
+            fetched_at TEXT NOT NULL,
+            status TEXT
+        );
+        CREATE TABLE IF NOT EXISTS macro (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            data TEXT NOT NULL,
+            source TEXT,
+            fetched_at TEXT NOT NULL
+        );
+    """)
+
+
 def _get_cache_db_connection(readonly=True):
     """Get a connection to shared/cache.db."""
     db_path = SHARED_DIR / "cache.db"
@@ -1697,6 +1730,7 @@ def _get_cache_db_connection(readonly=True):
     else:
         conn = sqlite3.connect(str(db_path))
         conn.execute("PRAGMA busy_timeout=5000")
+        _ensure_cache_tables(conn)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -2331,20 +2365,29 @@ def _get_fundamentals_data(symbol: str) -> Tuple[Optional[dict], Optional[str]]:
 
     # Try live fetch
     data = _fetch_fundamentals(symbol)
+    if isinstance(data, dict) and data.get("rate_limited"):
+        # Distinct from "no data" — don't burn the web fallback on a source
+        # we already know is exhausted for today, and don't let this get
+        # scored as a real empty signal downstream (signal_scorecard.py).
+        return None, "rate_limited"
     if data and data.get("pe_ratio") is not None:
         _cache.set(cache_key, data)
-        # Enqueue DB persistence
-        if _write_queue:
-            now_iso = datetime.now().isoformat()
-            fund_row = {
-                "ticker": symbol,
-                "pe_ratio": data.get("pe_ratio"),
-                "eps": data.get("eps"),
-                "dividend_yield": data.get("dividend_yield") or data.get("dividendYield"),
-                "market_cap": data.get("market_cap") or data.get("marketCap"),
-                "fetched_at": now_iso,
-            }
-            _write_queue.enqueue("fundamentals", fund_row)
+        # Persist immediately (not via _write_queue — that path wasn't
+        # landing rows in practice, 2026-07-24, and fundamentals only
+        # happens up to ~25x/day via Alpha Vantage, so a synchronous write
+        # costs nothing and is easier to reason about than the async queue).
+        now_iso = datetime.now().isoformat()
+        fund_row = {
+            "ticker": symbol,
+            "pe_ratio": data.get("pe_ratio"),
+            "eps": data.get("eps"),
+            "dividend_yield": data.get("dividend_yield") or data.get("dividendYield"),
+            "analyst_target": data.get("analyst_target"),
+            "market_cap": data.get("market_cap") or data.get("marketCap"),
+            "roe": data.get("roe"),
+            "fetched_at": now_iso,
+        }
+        _sqlite_persist("fundamentals", fund_row)
         return data, "combo_fetch"
 
     # SQLite fallback
@@ -2369,6 +2412,9 @@ def fundamentals():
         return jsonify({"error": "symbol parameter required"}), 400
 
     data, source = _get_fundamentals_data(symbol)
+    if source == "rate_limited":
+        return jsonify({"symbol": symbol, "fundamentals": None, "error": "rate_limited",
+                         "resets_at": rate_limiter.resets_at()}), 429
     if data is None:
         return jsonify({"symbol": symbol, "fundamentals": None, "error": "no data available"}), 404
 
@@ -5418,15 +5464,40 @@ if _mcp_tools_enabled():
         cached = _cache.get(cache_key, TTL["macro"])
         if cached is not None:
             return {"macro": cached, "source": cached.get("source", "cache")}
+
+        # In-memory cache is gone after a service restart — check the SQLite
+        # cache before hitting live sources. Same TTL as the in-memory cache.
+        db_row = _db_read("macro", "1=1", (), order_by="fetched_at DESC")
+        if db_row is not None:
+            try:
+                fetched_at = datetime.fromisoformat(db_row["fetched_at"])
+                age_seconds = (datetime.now() - fetched_at).total_seconds()
+            except (ValueError, TypeError):
+                age_seconds = TTL["macro"] + 1  # malformed timestamp, treat as stale
+            if age_seconds < TTL["macro"]:
+                macro_data = json.loads(db_row["data"])
+                _cache.set(cache_key, macro_data)
+                return {"macro": macro_data, "source": f"{db_row.get('source', 'sqlite')}_cached"}
+
         # Try LoneStarOracle first
         ls_data = _fetch_lonestar_macro()
         if ls_data and "error" not in ls_data:
             _cache.set(cache_key, ls_data)
+            # Synchronous persist, same reasoning as fundamentals above —
+            # macro fetches are infrequent (6h TTL), no need for a queue.
+            _sqlite_persist("macro", {
+                "data": json.dumps(ls_data), "source": "lonestar",
+                "fetched_at": datetime.now().isoformat(),
+            })
             return {"macro": ls_data, "source": "lonestar"}
         # Fall back to FRED
         data = _fetch_fred_macro()
         if data and "error" not in data:
             _cache.set(cache_key, data)
+            _sqlite_persist("macro", {
+                "data": json.dumps(data), "source": "fred",
+                "fetched_at": datetime.now().isoformat(),
+            })
             return {"macro": data, "source": "fred"}
         return {"error": "macro data unavailable"}
 
@@ -5516,6 +5587,9 @@ if _mcp_tools_enabled():
         if not sym:
             return {"error": "symbol required"}
         data, source = _get_fundamentals_data(sym)
+        if source == "rate_limited":
+            return {"symbol": sym, "fundamentals": None, "error": "rate_limited",
+                     "resets_at": rate_limiter.resets_at()}
         if data is None:
             return {"symbol": sym, "fundamentals": None, "error": "no data available"}
         result = {"symbol": sym, "fundamentals": data, "source": source}
