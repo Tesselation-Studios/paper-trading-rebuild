@@ -133,6 +133,14 @@ class ReplayResult:
     gross_pnl: float = 0.0     # P&L before transaction costs
     total_cost: float = 0.0    # total transaction cost deducted
 
+    # Per-tick timestamps parallel to equity_curve -- lets resample_to_daily_equity()
+    # (paper-trading-agents/scripts/replay_check.py) collapse tick-level equity into
+    # daily closes for Sharpe/drawdown-style risk metrics. Optional/empty for any
+    # caller that doesn't need daily resampling -- resample_to_daily_equity() already
+    # treats an empty/mismatched-length list as "older ReplayResult without
+    # timestamps" and returns None rather than erroring.
+    timestamps: List[datetime] = field(default_factory=list)
+
     @property
     def positive_trades(self) -> List[Trade]:
         return [t for t in self.trades if t.pnl > 0]
@@ -259,6 +267,7 @@ class ReplayHarness:
             # Record equity snapshot
             current_equity = self._portfolio.total_equity
             self._equity.append(current_equity)
+            self._timestamps.append(tick.timestamp)
             if prev_equity > 0:
                 self._returns.append((current_equity - prev_equity) / prev_equity)
             else:
@@ -273,6 +282,7 @@ class ReplayHarness:
         self._portfolio = Portfolio(cash=self.initial_balance)
         self._trades = []
         self._equity = []
+        self._timestamps = []
         self._returns = []
         self._decision_count = 0
         self._tickers_seen = []
@@ -427,6 +437,7 @@ class ReplayHarness:
             tickers_seen=list(dict.fromkeys(self._tickers_seen)),
             gross_pnl=gross_pnl,
             total_cost=total_cost,
+            timestamps=list(self._timestamps),
         )
 
 
