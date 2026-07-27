@@ -146,6 +146,16 @@ except ImportError:
     _HAS_NEWS_COLLECTOR = False
     log.warning("news_collector module not available — /news-cache, /news/search endpoints will be disabled")
 
+# ── Position stream (Alpaca websocket, real-time exit protection for Stan's
+#    held positions — see position_stream.py's module docstring) ─────────────
+try:
+    from src.position_stream import start_position_stream
+    _HAS_POSITION_STREAM = True
+except ImportError:
+    start_position_stream = None  # type: ignore
+    _HAS_POSITION_STREAM = False
+    log.warning("position_stream module not available — Stan's held positions have no event-driven exit protection")
+
 # ── Combo fetch imports ──────────────────────────────────────────────────────
 try:
     from skill_combo_fetch import (
@@ -7145,6 +7155,15 @@ def main():
         start_news_collector()
     else:
         log.warning("News collector not available — skipping")
+
+    # Start position stream (Alpaca websocket, real-time exit protection)
+    if _HAS_POSITION_STREAM and start_position_stream:
+        try:
+            start_position_stream()
+        except Exception as e:
+            log.warning("Position stream failed to start (non-fatal, Stan falls back to the 5-min poll cadence): %s", e)
+    else:
+        log.warning("Position stream not available — skipping")
 
     log.info("Data Bus starting on %s:%s", args.host, args.port)
     log.info("Tracked symbols: %s", sorted(_tracked_symbols)[:10])

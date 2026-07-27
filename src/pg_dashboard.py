@@ -28,11 +28,11 @@ def api_summary():
         tid = t["id"]
         cur.execute(
             "SELECT count(*) as total, coalesce(sum(pnl), 0) as pnl "
-            "FROM trading.executed_trades WHERE agent_id = %s", (tid,))
+            "FROM trading.trades WHERE trader_id = %s", (tid,))
         trades = cur.fetchone()
         cur.execute(
             "SELECT count(*) as today FROM trading.decisions "
-            "WHERE agent_id = %s AND timestamp > now() - interval '12 hours'", (tid,))
+            "WHERE trader_id = %s AND timestamp > now() - interval '12 hours'", (tid,))
         decisions = cur.fetchone()
         traders.append({
             **t,
@@ -48,18 +48,19 @@ def api_trades():
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute(
-        "SELECT agent_id, ticker, action, quantity, entry_price, exit_price, "
-        "pnl, entry_time, exit_time, status "
-        "FROM trading.executed_trades "
+        "SELECT trader_id, ticker, shares, entry_price, exit_price, "
+        "pnl, entry_time, exit_time "
+        "FROM trading.trades "
         "WHERE entry_time > now() - interval '7 days' "
-        "AND agent_id IN ('trader-kairos', 'trader-aldridge', 'trader-stonks') "
+        "AND trader_id IN ('trader-kairos', 'trader-aldridge', 'trader-stonks') "
         "ORDER BY entry_time DESC LIMIT 200")
     rows = cur.fetchall()
     conn.close()
+    dict_rows = [dict(r) for r in rows]
     return jsonify([{**r, "pnl": round(float(r["pnl"]), 2) if r["pnl"] else None,
                      "entry_price": round(float(r["entry_price"]), 2),
                      "exit_price": round(float(r["exit_price"]), 2) if r["exit_price"] else None}
-                    for r in rows])
+                    for r in dict_rows])
 
 @app.route("/api/decisions")
 def api_decisions():
@@ -82,11 +83,11 @@ def api_pnl():
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute(
-        "SELECT agent_id, date(entry_time) as day, "
+        "SELECT trader_id, date(entry_time) as day, "
         "count(*) as trades, round(sum(coalesce(pnl,0))::numeric, 2) as pnl "
-        "FROM trading.executed_trades "
+        "FROM trading.trades "
         "WHERE entry_time > now() - interval '30 days' "
-        "AND agent_id IN ('trader-kairos', 'trader-aldridge', 'trader-stonks') "
+        "AND trader_id IN ('trader-kairos', 'trader-aldridge', 'trader-stonks') "
         "GROUP BY 1,2 ORDER BY 2 desc, 1")
     rows = cur.fetchall()
     conn.close()
@@ -96,7 +97,7 @@ def api_pnl():
 def health():
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT count(*) FROM trading.executed_trades")
+    cur.execute("SELECT count(*) FROM trading.trades")
     trades = cur.fetchone()[0]
     cur.execute("SELECT count(*) FROM trading.decisions WHERE timestamp > now() - interval '1 hour'")
     recent = cur.fetchone()[0]
