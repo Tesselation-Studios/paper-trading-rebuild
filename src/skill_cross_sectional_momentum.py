@@ -14,8 +14,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -26,15 +28,57 @@ log = logging.getLogger("momentum")
 # ── Config ────────────────────────────────────────────────────────────────────
 DATA_BUS_URL = os.getenv("DATA_BUS_URL", "http://localhost:5000")
 
-# Tracked symbols (same as data bus)
+# Old Kairos-era mega-cap list (Kairos/Aldridge retired 2026-07-25). Kept only
+# as a last-resort fallback for get_stonks_universe() below — Stan (the sole
+# remaining trader) trades small/mid-cap, none of these overlap his universe.
 TRACKED_SYMBOLS = [
     "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "SPY", "QQQ",
     "JPM", "V", "WMT", "JNJ", "XOM", "BAC", "DIS", "KO",
 ]
 
+STONKS_WORKSPACE = Path(
+    os.getenv("STONKS_WORKSPACE", "/home/openclaw/.openclaw/workspace-trader-stonks")
+)
+
 # Cache
 _signal_cache: Dict[str, Any] = {}
 _cache_ttl = 300  # 5 minutes
+
+
+def read_stonks_universe_from_workspace() -> List[str]:
+    """Stan's actual tracked universe: open positions + active watchlist candidates.
+
+    Reads his workspace files directly — his real source of truth (he writes
+    strategies/watchlist.md + positions/*.md, not any SQL watchlist table).
+    Returns [] if the workspace is unreadable/empty; callers decide their own
+    fallback rather than this function silently substituting one.
+    """
+    tickers: set = set()
+    try:
+        positions_dir = STONKS_WORKSPACE / "positions"
+        if positions_dir.is_dir():
+            tickers.update(f.stem.upper() for f in positions_dir.glob("*.md"))
+
+        watchlist_path = STONKS_WORKSPACE / "strategies" / "watchlist.md"
+        if watchlist_path.is_file():
+            for line in watchlist_path.read_text().splitlines():
+                line = line.strip()
+                if not line.startswith("- ") or "~~" in line:
+                    continue
+                m = re.match(r"^- ([A-Z]{1,6}(?:\.[A-Z])?)\s+—", line)
+                if m:
+                    tickers.add(m.group(1))
+    except Exception as e:
+        log.warning("Could not read Stan's workspace for dynamic universe: %s", e)
+
+    return sorted(tickers)
+
+
+def get_stonks_universe() -> List[str]:
+    """Stan's tracked universe, falling back to the old Kairos mega-cap list
+    (TRACKED_SYMBOLS) only if his workspace is unreadable or empty."""
+    universe = read_stonks_universe_from_workspace()
+    return universe if universe else TRACKED_SYMBOLS
 
 # ── Momentum computation ─────────────────────────────────────────────────────
 
@@ -161,7 +205,7 @@ def get_cached_momentum_signal(top_n: int = 10) -> Optional[Dict[str, Any]]:
         if now - cached.get("_fetched_at", 0) < _cache_ttl:
             return cached
 
-    ranked = compute_momentum(TRACKED_SYMBOLS)
+    ranked = compute_momentum(get_stonks_universe())
     if not ranked:
         return None
 

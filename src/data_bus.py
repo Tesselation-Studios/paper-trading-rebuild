@@ -6114,6 +6114,19 @@ def _load_tracked_symbols():
     except Exception as e:
         log.warning("Could not load watchlist symbols: %s", e)
 
+    # Fall back to Stan's actual workspace watchlist if the watchlist table(s)
+    # were empty — Stan (sole trader since Kairos/Aldridge retired 2026-07-25)
+    # writes to strategies/watchlist.md + positions/*.md, not this SQL table.
+    if not _tracked_symbols:
+        try:
+            from src.skill_cross_sectional_momentum import read_stonks_universe_from_workspace
+            stonks_symbols = set(read_stonks_universe_from_workspace())
+            if stonks_symbols:
+                _tracked_symbols = stonks_symbols
+                log.info("Loaded %d tracked symbols from Stan's workspace", len(stonks_symbols))
+        except Exception as e:
+            log.warning("Could not load Stan's workspace universe: %s", e)
+
     # Fall back to defaults if no symbols found anywhere
     if not _tracked_symbols:
         _tracked_symbols = {"AAPL", "MSFT", "NVDA", "TSLA", "SPY", "QQQ", "AMZN", "GOOGL", "META"}
