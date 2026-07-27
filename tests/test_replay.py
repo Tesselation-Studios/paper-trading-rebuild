@@ -203,6 +203,23 @@ class TestReplayHarnessBasic:
         assert len(result.equity_curve) == 25
         assert len(result.returns) == 25
 
+    def test_timestamps_parallel_equity_curve(self):
+        """2026-07-27: timestamps was missing from ReplayResult entirely --
+        paper-trading-agents' resample_to_daily_equity() (and its tests)
+        expected it, cross-repo drift that went undetected until backtests
+        were actually run. One timestamp per tick, same order/length as
+        equity_curve, taken from each tick's own timestamp."""
+        ticks = make_uptrend_ticks(n=25)
+        harness = ReplayHarness()
+        result = harness.run(ticks, buy_hold_trader)
+        assert len(result.timestamps) == len(result.equity_curve) == 25
+        assert result.timestamps == [t.timestamp for t in ticks]
+
+    def test_timestamps_empty_for_empty_replay(self):
+        harness = ReplayHarness(initial_balance=50_000)
+        result = harness.run([], buy_hold_trader)
+        assert result.timestamps == []
+
     def test_trade_record(self):
         """Verify trade records have correct fields."""
         ticks = make_uptrend_ticks(n=40, start_price=100.0, drift=0.20, seed=3)
