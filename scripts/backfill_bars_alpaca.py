@@ -241,7 +241,13 @@ def fetch_bars_alpaca(ticker: str, start: str, end: str) -> Optional[pd.DataFram
         client = StockHistoricalDataClient(api_key, secret_key)
 
         start_ts = pd.Timestamp(start, tz="America/New_York")
-        end_ts = pd.Timestamp(end, tz="America/New_York")
+        # `end` is a calendar date string (e.g. "2026-07-27"), which parses to
+        # that date's midnight -- the very start of the day, before market open.
+        # Alpaca's `end` param is an upper bound on bar timestamps, so leaving
+        # it at midnight excludes the ENTIRE end date's trading session (every
+        # real bar on that date falls after midnight). Bump to the start of the
+        # following day so the full end date is actually included.
+        end_ts = pd.Timestamp(end, tz="America/New_York") + pd.Timedelta(days=1)
 
         request_params = StockBarsRequest(
             symbol_or_symbols=[ticker],
@@ -465,9 +471,17 @@ def main():
     total_fetched = 0
     total_errors = 0
     total_skipped = 0
+    total_empty = 0
 
     for ticker in tickers:
-        status, label, count = backfill_ticker(
+        # backfill_ticker returns (ticker, status, count) -- this used to be
+        # unpacked as (status, label, count), which silently swapped ticker
+        # and status into the wrong variables. Every branch below compared a
+        # ticker symbol (e.g. "SPY") against "ok"/"error"/"skipped", which
+        # can never match, so total_fetched/total_errors/total_skipped were
+        # ALWAYS zero regardless of what actually happened -- the printed
+        # summary was dead from the start, independent of the end-date bug.
+        _ticker, status, count = backfill_ticker(
             ticker, args.days, repair=args.repair, force=args.force,
             check_only=args.check, verbose=args.verbose,
         )
@@ -477,18 +491,33 @@ def main():
             total_errors += 1
         elif status == "skipped":
             total_skipped += 1
+        # "empty"/"invalid" used to fall through uncounted here, so a run
+        # that fetched real bars for zero tickers still printed "0 errors"
+        # and exited 0 -- the cron then reported "ok" despite doing nothing.
+        # See 2026-07-28 incident: every ticker (including SPY) silently
+        # returned "empty" for days due to the end-date bug above, and
+        # nothing ever flagged it.
+        elif status in ("empty", "invalid"):
+            total_empty += 1
 
         time.sleep(FETCH_DELAY)
 
     print(f"\nSummary: {total_fetched} bars fetched, "
-          f"{total_skipped} skipped, {total_errors} errors")
+          f"{total_skipped} skipped, {total_errors} errors, "
+          f"{total_empty} empty/invalid")
 
-    # Exit with error if any ticker failed
+    # Exit with error if any ticker failed outright
     if total_errors > 0:
         return 1
-    # Exit with 99 if all skipped (no work to do — same as yfinance version)
-    if total_fetched == 0 and total_skipped > 0:
-        return 0
+    # Exit with error if every non-skipped ticker came back empty/invalid --
+    # a handful of illiquid small-caps having no data is expected, but zero
+    # real data across the whole run (this incident: 19/19, later 37/37)
+    # means something upstream is broken, not that the market was quiet.
+    attempted = total_empty + total_fetched
+    if attempted > 0 and total_fetched == 0:
+        print(f"ERROR: {total_empty}/{attempted} tickers returned no usable "
+              f"data and zero bars were fetched overall.", file=sys.stderr)
+        return 1
     return 0
 
 
