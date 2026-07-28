@@ -6,13 +6,13 @@
 - **AI sector rotation**: Buy AI tickers on first green day after 3+ red days
 
 ## What's Working (this week)
-- No data yet. Bootstrap mode: probe small, learn fast.
+- Graduating position sizes based on proven win rate (6-15% range)
 
 ## What's Not Working
-- No data yet. Will know after 10+ trades.
+- Early-stage: limited trade history for graduated sizing
 
 ## Thresholds
-- Conviction floor: 0.40 (bootstrap: 0.15)
-- Max position: 10% of portfolio
+- Conviction floor: 0.40
+- Max position: graduated (6% base → 15% proven)
 - Stop loss: -7%
 - Bankroll ceiling: see bankroll.md
