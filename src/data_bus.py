@@ -2071,6 +2071,37 @@ def metrics():
         name = s.name
         lines.append(f'databus_scheduler_errors{{scheduler="{name}"}} {1 if s.last_error else 0}')
 
+    # trader-stonks discovery_daemon.py health, read directly (same host/user,
+    # no shared mount needed). Staleness math mirrors discovery_daemon.py's
+    # own CONFIG (market_hours_interval_seconds=120, off_hours_interval_seconds=900,
+    # daemon_health_stale_multiplier=3) -- keep in sync manually if that changes.
+    # Done here in Python (reusing _is_market_open()) rather than in PromQL so
+    # the alert rule itself stays a trivial `== 0` check.
+    discovery_daemon_state_path = "/home/openclaw/.openclaw/workspace-trader-stonks/state/discovery_daemon.json"
+    try:
+        with open(discovery_daemon_state_path) as f:
+            dd_state = json.load(f)
+        dd_last = dd_state.get("last_cycle_completed_at")
+        if dd_last:
+            dd_last_epoch = datetime.fromisoformat(dd_last).timestamp()
+            dd_threshold = 360 if _is_market_open() else 2700
+            dd_healthy = 1 if (time.time() - dd_last_epoch) <= dd_threshold else 0
+        else:
+            dd_last_epoch, dd_healthy = None, 0
+
+        lines.append("# HELP databus_discovery_daemon_last_cycle_seconds Unix ts of discovery_daemon.py's last completed cycle")
+        lines.append("# TYPE databus_discovery_daemon_last_cycle_seconds gauge")
+        if dd_last_epoch is not None:
+            lines.append(f"databus_discovery_daemon_last_cycle_seconds {dd_last_epoch:.1f}")
+        lines.append("# HELP databus_discovery_daemon_healthy 1 if last cycle within market/off-hours staleness window, else 0")
+        lines.append("# TYPE databus_discovery_daemon_healthy gauge")
+        lines.append(f"databus_discovery_daemon_healthy {dd_healthy}")
+    except Exception:
+        # Never let a stonks-side file issue break the whole /metrics endpoint
+        lines.append("# HELP databus_discovery_daemon_healthy 1 if last cycle within staleness window, else 0")
+        lines.append("# TYPE databus_discovery_daemon_healthy gauge")
+        lines.append("databus_discovery_daemon_healthy 0")
+
     lines.append("")  # newline at end
     return Response("\n".join(lines), mimetype="text/plain; version=0.0.4")
 
