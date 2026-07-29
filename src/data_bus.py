@@ -1262,10 +1262,34 @@ _sec_cik_tickers_loaded = False
 
 
 def _load_sec_cik_tickers():
-    """Fetch and cache SEC company_tickers.json (CIK → ticker mapping)."""
+    """Load SEC company_tickers.json (CIK → ticker mapping).
+    Tries local cache first (shared/cache/company_tickers.json), falls back
+    to SEC.gov — which aggressively rate-limits (2026-07-29: blocked with
+    'Request Rate Threshold Exceeded'). Local cache is the primary path."""
     global _sec_cik_tickers, _sec_cik_tickers_loaded
     if _sec_cik_tickers_loaded:
         return
+    import json as _json
+    cache_path = SHARED_DIR / "cache" / "company_tickers.json"
+    
+    def _parse_tickers(data):
+        for entry in data.values():
+            cik = str(entry.get("cik_str", ""))
+            ticker = entry.get("ticker", "")
+            if cik and ticker:
+                _sec_cik_tickers[cik] = ticker
+        _sec_cik_tickers_loaded = True
+
+    # Try local cache first — SEC.gov rate-limits aggressively
+    if cache_path.exists():
+        try:
+            data = _json.loads(cache_path.read_text())
+            _parse_tickers(data)
+            log.info("Loaded %d CIK→ticker mappings from local cache", len(_sec_cik_tickers))
+            return
+        except Exception as e:
+            log.warning("Local CIK cache read failed: %s, falling back to SEC.gov", e)
+
     try:
         import requests as req
         resp = req.get(
@@ -1275,14 +1299,11 @@ def _load_sec_cik_tickers():
         )
         if resp.status_code == 200:
             data = resp.json()
-            # Format: {"0": {"cik_str": 320193, "ticker": "AAPL", "title": "..."}, ...}
-            for entry in data.values():
-                cik = str(entry.get("cik_str", ""))
-                ticker = entry.get("ticker", "")
-                if cik and ticker:
-                    _sec_cik_tickers[cik] = ticker
-            _sec_cik_tickers_loaded = True
-            log.info("Loaded %d CIK→ticker mappings from SEC", len(_sec_cik_tickers))
+            _parse_tickers(data)
+            # Cache locally for future restarts
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(resp.text)
+            log.info("Loaded %d CIK→ticker mappings from SEC.gov + cached locally", len(_sec_cik_tickers))
     except Exception as e:
         log.warning("Could not load SEC CIK tickers: %s", e)
 
