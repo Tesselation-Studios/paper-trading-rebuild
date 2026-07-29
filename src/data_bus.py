@@ -5398,6 +5398,16 @@ if _mcp_tools_enabled():
         if result:
             result["analysis_text_source"] = news_source
             _cache.set(cache_key, result)
+            # Persist to cache.db so other sessions (and next ticks) can read it
+            if _write_queue:
+                now_iso = datetime.now().isoformat()
+                score_raw = result.get("sentiment") or result.get("score") or result.get("label", "")
+                sent_row = {
+                    "ticker": sym,
+                    "overall_sentiment": str(score_raw)[:50] if not isinstance(score_raw, (int, float)) else ("bullish" if score_raw > 0.3 else "bearish" if score_raw < -0.3 else "neutral"),
+                    "fetched_at": now_iso,
+                }
+                _write_queue.enqueue("sentiment", sent_row)
             output = {"symbol": sym, "sentiment": result, "source": "live"}
             # Try live Praesentire
             prae_data = _fetch_praesentire_sentiment(sym)
