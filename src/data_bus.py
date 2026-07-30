@@ -5647,7 +5647,19 @@ if _mcp_tools_enabled():
 
 
 def _start_mcp_server():
-    """Start MCP server in a background thread (SSE transport)."""
+    """Start MCP server in a background thread (SSE transport).
+
+    2026-07-30: tried switching to transport="streamable-http" to fix a
+    sustained ~65-100% single-core CPU load (the "mcp-event-loop" thread
+    spinning in asyncio's _run_once instead of idling in select/epoll) --
+    the server side worked standalone (verified via a raw curl MCP
+    handshake against /mcp), but openclaw's own MCP client hung
+    indefinitely connecting to it, stalling the whole gateway startup for
+    7+ minutes with no error logged. Reverted both sides (this file and
+    openclaw.json's data-bus entry) back to SSE pending investigation into
+    why openclaw's streamable-http client didn't complete the handshake
+    that a raw curl request completed fine.
+    """
     if not _mcp_tools_enabled():
         log.info("MCP server: disabled (FastMCP not available)")
         return None
