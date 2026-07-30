@@ -2728,7 +2728,8 @@ def news_cache_feed():
     import psycopg2
     import psycopg2.extras
 
-    db_url = "postgresql://trader:@192.168.1.179:5433/trading"
+    import os as _os
+    db_url = _os.environ.get("VT_DB_DSN", "postgresql://trader:@192.168.1.179:5433/trading")
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
     where_parts = ["published_at >= %s::timestamptz"]
@@ -2745,18 +2746,18 @@ def news_cache_feed():
         conn.set_session(readonly=True)
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
-                f"""SELECT id, url, title, summary, source, published_at, collected_at,
-                           tickers, sentiment_score
-                    FROM public.news_cache
-                    WHERE {where}
-                    ORDER BY published_at DESC
-                    LIMIT %s""",
+                "SELECT id, url, title, summary, source, published_at, collected_at,"
+                "       tickers, sentiment_score"
+                " FROM public.news_cache"
+                f" WHERE {where}"
+                " ORDER BY published_at DESC"
+                " LIMIT %s",
                 params + [limit],
             )
             rows = cur.fetchall()
         conn.close()
     except Exception as e:
-        log.warning("news_cache query failed: %s", e)
+        log.error("news_cache query failed: %s", e)
         return jsonify({"news": [], "count": 0, "error": str(e)}), 500
 
     articles = []
@@ -2806,7 +2807,7 @@ def news_search():
     import psycopg2
     import psycopg2.extras
 
-    db_url = "postgresql://trader:@192.168.1.179:5433/trading"
+    db_url = _os.environ.get("VT_DB_DSN", "postgresql://trader:@192.168.1.179:5433/trading")
     search_pattern = f"%{q}%"
 
     try:
@@ -2825,7 +2826,7 @@ def news_search():
             rows = cur.fetchall()
         conn.close()
     except Exception as e:
-        log.warning("news_search query failed: %s", e)
+        log.error("news_search query failed: %s", e)
         return jsonify({"news": [], "count": 0, "error": str(e)}), 500
 
     articles = []
@@ -6630,7 +6631,7 @@ def discover():
 # Virtual Trader Registration & Management
 # ═══════════════════════════════════════════════════════════════════════════════
 
-_VT_DB_DSN = os.getenv("VT_DB_DSN", "host=docker.klo port=5433 dbname=trading user=trader")
+_VT_DB_DSN = os.getenv("VT_DB_DSN", "host=localhost port=5433 dbname=trading user=trader")
 
 
 def _get_vt_db():
