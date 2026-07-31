@@ -2373,6 +2373,42 @@ def crypto():
 
 # ── Fundamentals ──────────────────────────────────────────────────────────────
 
+def _read_ml_win_signal(symbol: str) -> Optional[dict]:
+    """Read the trained ML win/loss signal for one ticker from the artifact
+    the standalone ML training service writes.
+
+    Artifact contract: SHARED_DIR/ml_signals/latest.json -- a single JSON
+    dict keyed by uppercase ticker symbol, e.g.:
+        {"NVDA": {"p_win": 0.62, "explanation": "...", "model_type":
+         "logistic_regression", "trained_at": "2026-07-31T18:00:00Z",
+         "confidence_note": "walk-forward validated on N examples"}, ...}
+    The training service (built separately, GPU worker) owns writing this
+    file; this function only reads it. Read fresh on every call rather than
+    cached -- it's a local file read (cheap) and the whole point is that the
+    training service can rewrite it periodically without the data bus
+    needing a restart or TTL to notice.
+
+    Returns None (not an exception) if the file doesn't exist yet, is
+    malformed, or doesn't have an entry for this symbol -- all expected,
+    normal states for a caller to handle gracefully, not error states.
+    """
+    artifact_path = SHARED_DIR / "ml_signals" / "latest.json"
+    if not artifact_path.exists():
+        return None
+    try:
+        with open(artifact_path, "r") as f:
+            all_signals = json.load(f)
+    except (OSError, ValueError, json.JSONDecodeError) as e:
+        log.warning("ml_signal artifact unreadable (%s): %s", artifact_path, e)
+        return None
+    if not isinstance(all_signals, dict):
+        return None
+    entry = all_signals.get(symbol.strip().upper())
+    if not isinstance(entry, dict):
+        return None
+    return entry
+
+
 def _get_fundamentals_data(symbol: str) -> Tuple[Optional[dict], Optional[str]]:
     """Tiered fundamentals lookup: cache -> SQLite -> live combo_fetch -> SQLite -> yfinance web.
 
@@ -5548,6 +5584,49 @@ if _mcp_tools_enabled():
                 results[s] = {"source": s, "posts": [], "sentiment_score": 0.0,
                               "matched_tickers": [], "error": str(e)}
         return results if src == "all" else results[src]
+
+    @mcp_server.tool()
+    async def get_ml_signal(symbol: str) -> dict:
+        """Get the trained ML win/loss signal for a ticker, if the ML training
+        service has produced one yet.
+
+        Reads shared/ml_signals/latest.json -- a JSON artifact written
+        periodically by a standalone ML training service (logistic-regression
+        win/loss classifier, walk-forward validated, trained on a GPU worker;
+        that service is separate infra and may not exist/have run yet).
+        Returns both the raw probability (p_win) AND a plain-language
+        explanation of why the model sees it that way -- per this project's
+        design principle, a numerical score is never returned bare, the same
+        way get_congress/get_social pair a number with something to read.
+
+        This is one signal among several (fundamentals, congress trades,
+        social sentiment, wiki narratives, technicals) -- fold it into the
+        gestalt, don't treat it as a gate or trust it alone. It's also the
+        newest/least-proven signal in the stack, so weight accordingly.
+
+        If the artifact doesn't exist yet (expected before the training
+        service ships) or has no entry for this symbol, this returns a
+        graceful "no signal yet" response, not an error."""
+        sym = symbol.strip().upper()
+        if not sym:
+            return {"error": "symbol required"}
+        entry = _read_ml_win_signal(sym)
+        if entry is None:
+            return {"symbol": sym, "ml_signal": None,
+                     "status": "no_signal_yet",
+                     "note": "ML training service hasn't published a signal for this symbol yet"}
+        return {
+            "symbol": sym,
+            "ml_signal": {
+                "p_win": entry.get("p_win"),
+                "explanation": entry.get("explanation"),
+                "model_type": entry.get("model_type"),
+                "trained_at": entry.get("trained_at"),
+                "confidence_note": entry.get("confidence_note"),
+            },
+            "status": "ok",
+            "source": "ml_training_service",
+        }
 
     @mcp_server.tool()
     async def get_macro() -> dict:
