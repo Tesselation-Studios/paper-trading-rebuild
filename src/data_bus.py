@@ -5516,6 +5516,40 @@ if _mcp_tools_enabled():
         return result
 
     @mcp_server.tool()
+    async def get_social(source: str = "all") -> dict:
+        """Get social media sentiment/posts for tracked tickers (Reddit,
+        StockTwits, Bluesky). source: 'reddit', 'stocktwits', 'bluesky', or
+        'all' (default). Returns raw posts plus a basic aggregate sentiment
+        score -- the interpretation (is this real signal or noise, does it
+        square with the technicals) is a judgment call, not something to
+        trust as a number alone."""
+        src = (source or "all").strip().lower()
+        valid_sources = {"bluesky", "stocktwits", "reddit", "all"}
+        if src not in valid_sources:
+            return {"error": f"source must be one of: {', '.join(sorted(valid_sources))}"}
+
+        cached = _get_social_cache(src)
+        if cached is not None:
+            return cached
+
+        sources_to_fetch = ["bluesky", "stocktwits", "reddit"] if src == "all" else [src]
+        deadline = time.time() + 10
+        fetch_map = {
+            "bluesky": lambda: _fetch_social_bluesky(max_tickers=5, deadline=deadline),
+            "stocktwits": lambda: _fetch_social_stocktwits(max_tickers=5, deadline=deadline),
+            "reddit": lambda: _fetch_social_reddit(max_tickers=3),
+        }
+        results = {}
+        for s in sources_to_fetch:
+            try:
+                results[s] = fetch_map[s]()
+            except Exception as e:
+                log.warning("get_social live fetch failed for %s: %s", s, e)
+                results[s] = {"source": s, "posts": [], "sentiment_score": 0.0,
+                              "matched_tickers": [], "error": str(e)}
+        return results if src == "all" else results[src]
+
+    @mcp_server.tool()
     async def get_macro() -> dict:
         """Get macro indicators: FRED data, yield curve, FOMC rates."""
         cache_key = "macro:latest"
