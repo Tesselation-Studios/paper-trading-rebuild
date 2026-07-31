@@ -6,7 +6,7 @@ Replaces backfill_bars.py (yfinance) since Yahoo Finance is unreachable
 from the homelab. Same output format: Parquet files with technical indicators
 (RSI, MACD, ATR) in shared/cache/bars/<ticker>.parquet.
 
-Idempotent — checks existing dates, only fetches missing ones.
+Idempotent -- checks existing dates, only fetches missing ones.
 
 Usage:
     python3 scripts/backfill_bars_alpaca.py --tickers core --days 20
@@ -26,16 +26,25 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple, Any
 
-# ── Path setup ───────────────────────────────────────────────────────────────
+from dotenv import load_dotenv
+
+# ------ Path setup ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 SHARED_DIR = PROJECT_DIR / "shared"
 BARS_DIR = SHARED_DIR / "cache" / "bars"
 
 BARS_DIR.mkdir(parents=True, exist_ok=True)
 
+# Only injected automatically under databus.service (systemd EnvironmentFile);
+# load explicitly here so this also works for manual/cron invocation
+# (e.g. overnight_optimization_runner.py's seed step).
+_repo_env = PROJECT_DIR / ".env"
+if _repo_env.exists():
+    load_dotenv(_repo_env, override=False)
+
 import pandas as pd
 
-# ── Ticker groups ────────────────────────────────────────────────────────────
+# ------ Ticker groups ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 CORE_TICKERS: List[str] = [
     "SPY", "AAPL", "MSFT", "NVDA", "TSLA", "META", "GOOGL", "AMZN",
 ]
@@ -56,7 +65,7 @@ TRADER_TICKERS: Dict[str, List[str]] = {
     ],
 }
 
-# Interval for Alpaca — 5-min bars
+# Interval for Alpaca -- 5-min bars
 INTERVAL = "5Min"
 FETCH_DELAY = 0.25  # Alpaca allows generous rate limits
 
@@ -79,7 +88,7 @@ def resolve_tickers(spec: str) -> List[str]:
     return sorted([t.strip().upper() for t in spec.split(",") if t.strip()])
 
 
-# ── Lazy pandas_ta import (optional) ─────────────────────────────────────────
+# ------ Lazy pandas_ta import (optional) ---------------------------------------------------------------------------------------------------------------------------
 _has_pandas_ta: bool = False
 try:
     import pandas_ta as ta
@@ -88,7 +97,7 @@ except ImportError:
     ta = None
 
 
-# ── Data quality validation ──────────────────────────────────────────────────
+# ------ Data quality validation ------------------------------------------------------------------------------------------------------------------------------------------------------
 # Minimum distinct close prices per trading date to consider bars valid.
 # A healthy 6.5h day has ~78 5-min bars. Bad data (flat prices) has 1-5.
 MIN_DISTINCT_CLOSES_PER_DATE = 20
@@ -157,7 +166,7 @@ def missing_date_range(
     if existing is None:
         existing = existing_dates(ticker)
 
-    # Exclude today — Alpaca IEX returns bad data for incomplete trading days
+    # Exclude today -- Alpaca IEX returns bad data for incomplete trading days
     today = date.today()
     end_date = today - timedelta(days=1)
 
@@ -232,8 +241,10 @@ def fetch_bars_alpaca(ticker: str, start: str, end: str) -> Optional[pd.DataFram
         from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
         from alpaca.data.enums import DataFeed
 
-        api_key = os.environ.get("APCA_API_KEY_ID") or os.environ.get("ALPACA_API_KEY")
-        secret_key = os.environ.get("APCA_API_SECRET_KEY") or os.environ.get("ALPACA_SECRET_KEY")
+        api_key = (os.environ.get("APCA_API_KEY_ID") or os.environ.get("ALPACA_API_KEY")
+                   or os.environ.get("ALPACA_STONKS_KEY"))
+        secret_key = (os.environ.get("APCA_API_SECRET_KEY") or os.environ.get("ALPACA_SECRET_KEY")
+                      or os.environ.get("ALPACA_STONKS_SECRET"))
         if not api_key or not secret_key:
             print(f"  ERROR: Alpaca credentials not found in env (APCA_API_KEY_ID)", file=sys.stderr)
             return None
@@ -390,7 +401,7 @@ def backfill_ticker(
             return ticker, "gaps", len(missing)
 
     if verbose:
-        print(f"  {ticker}: fetching {start_str} → {end_str} from Alpaca...")
+        print(f"  {ticker}: fetching {start_str} -> {end_str} from Alpaca...")
 
     new_df = fetch_bars_alpaca(ticker, start_str, end_str)
 
@@ -398,10 +409,10 @@ def backfill_ticker(
         print(f"  {ticker}: no data returned", file=sys.stderr)
         return ticker, "empty", 0
 
-    # Validate data quality before caching (P0 guard — identical close prices)
+    # Validate data quality before caching (P0 guard -- identical close prices)
     is_valid, issues = validate_bars(new_df, ticker)
     if not is_valid:
-        print(f"  {ticker}: data quality FAILED — discarding bad data:", file=sys.stderr)
+        print(f"  {ticker}: data quality FAILED -- discarding bad data:", file=sys.stderr)
         for issue in issues:
             print(f"    {issue}", file=sys.stderr)
         return ticker, "invalid", 0
@@ -411,7 +422,7 @@ def backfill_ticker(
     # Re-validate after merge (catches propagation of bad data from cache)
     merged_valid, merged_issues = validate_bars(merged, ticker)
     if not merged_valid:
-        print(f"  {ticker}: merged data FAILED validation — discarding:", file=sys.stderr)
+        print(f"  {ticker}: merged data FAILED validation -- discarding:", file=sys.stderr)
         for issue in merged_issues:
             print(f"    {issue}", file=sys.stderr)
         return ticker, "invalid", 0
@@ -421,7 +432,7 @@ def backfill_ticker(
     new_count = len(new_df)
     total_count = len(merged)
     if verbose:
-        print(f"  {ticker}: {new_count} new bars → {total_count} total "
+        print(f"  {ticker}: {new_count} new bars -> {total_count} total "
               f"({len(merged['timestamp'].dt.date.unique())} dates)")
 
     return ticker, "ok", new_count

@@ -13,9 +13,11 @@ import pyarrow.parquet as pq
 
 # ── Add project root ──
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from src.overnight_harness import OvernightHarness, DiscoveryConfig
 from src.replay import Tick
+from backfill_bars_alpaca import backfill_ticker
 
 log = logging.getLogger("overnight-optimization-runner")
 
@@ -398,11 +400,39 @@ def run_iteration(it, seed_base):
         return None, error_text
 
 
+def seed_missing_data(days: int = 3) -> None:
+    """Backfill any ticker in the 'all' universe with no/thin cached bars
+    before a sweep starts, instead of load_ticks() silently skipping
+    missing tickers and shrinking the universe with no error. Incremental
+    (backfill_ticker only fetches actual gaps) so this is cheap on repeat
+    runs. 3 days matches Alpaca's real 5-min-bar retention window."""
+    tickers = UNIVERSES["all"]
+    print(f"Seeding data for {len(tickers)} tickers ({days}d 5-min bars)...")
+    fetched, skipped, errors = 0, 0, 0
+    for tkr in tickers:
+        try:
+            _, status, count = backfill_ticker(tkr, days=days, verbose=False)
+            if status == "ok" and count > 0:
+                fetched += 1
+                print(f"  {tkr}: fetched {count} new bars")
+            elif status == "skipped":
+                skipped += 1
+            else:
+                errors += 1
+                print(f"  {tkr}: {status}")
+        except Exception as e:
+            errors += 1
+            print(f"  {tkr}: seed failed: {e}")
+    print(f"Seed complete: {fetched} fetched, {skipped} already fresh, {errors} errors\n")
+
+
 def main():
     start_time = time.time()
     max_runtime = 7 * 3600  # 7 hours
     run_results = []
-    
+
+    seed_missing_data()
+
     for i, it in enumerate(ITERATIONS):
         elapsed = time.time() - start_time
         if elapsed > max_runtime * 0.85:  # Stop if we've used >85% of budget
