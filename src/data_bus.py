@@ -5498,6 +5498,24 @@ if _mcp_tools_enabled():
         return {"symbol": sym, "error": "insider data unavailable"}
 
     @mcp_server.tool()
+    async def get_congress(symbol: str) -> dict:
+        """Get recent congressional (Senate/House) stock trading disclosures for a ticker.
+
+        Free-tier FMP source (senate-latest/house-latest, filtered locally) --
+        covers roughly the last 1-2 weeks of disclosures, not full history.
+        Finnhub's congressional-trading endpoint is paid-tier-gated on this
+        account (confirmed HTTP 403), so this is the primary source, not a
+        fallback."""
+        sym = symbol.strip().upper()
+        if not sym:
+            return {"error": "symbol required"}
+        from src.fmp_fetcher import get_congressional_trading
+        result = get_congressional_trading(sym)
+        if result.get("status") == "error":
+            return {"symbol": sym, "error": result.get("error", "congress data unavailable")}
+        return result
+
+    @mcp_server.tool()
     async def get_macro() -> dict:
         """Get macro indicators: FRED data, yield curve, FOMC rates."""
         cache_key = "macro:latest"
