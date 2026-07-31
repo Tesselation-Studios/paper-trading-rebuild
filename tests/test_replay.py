@@ -256,6 +256,117 @@ class TestReplayHarnessBasic:
         assert isinstance(t.return_pct, float)
 
 
+class TestFillAtNextOpen:
+    """2026-07-31: fills used to happen at the SAME tick's close the
+    decision was made on -- the entry gate could judge a bar's price
+    action and then trade AT that exact bar's close, the same price the
+    decision used to evaluate it. Default is now to fill at the NEXT
+    same-ticker tick's open instead -- the earliest realistic execution
+    price for a decision informed by the prior bar's close."""
+
+    def _tick(self, ticker, ts, open_, close):
+        return make_dummy_tick(ticker=ticker, price=close, timestamp=ts, open=open_, close=close)
+
+    def test_buy_fills_at_next_tick_open_not_decision_tick_close(self):
+        t0 = self._tick("AAA", datetime(2024, 1, 2, 9, 30), open_=100.0, close=110.0)
+        t1 = self._tick("AAA", datetime(2024, 1, 2, 9, 31), open_=120.0, close=125.0)
+
+        harness = ReplayHarness(initial_balance=100_000)
+        result = harness.run([t0, t1], buy_hold_trader)
+
+        assert len(harness._portfolio.positions) == 1  # still open, buy_hold never sells
+        pos = harness._portfolio.positions["AAA"]
+        # Must fill at t1's OPEN (120.0), not t0's close (110.0, the bar
+        # the BUY decision was actually made on) and not t1's close (125.0).
+        assert pos.entry_price == 120.0
+        assert pos.entry_time == t1.timestamp
+
+    def test_sell_fills_at_next_tick_open(self):
+        t0 = self._tick("AAA", datetime(2024, 1, 2, 9, 30), open_=100.0, close=100.0)
+        t1 = self._tick("AAA", datetime(2024, 1, 2, 9, 31), open_=105.0, close=105.0)
+        t2 = self._tick("AAA", datetime(2024, 1, 2, 9, 32), open_=110.0, close=200.0)  # sell signal fires here
+        t3 = self._tick("AAA", datetime(2024, 1, 2, 9, 33), open_=90.0, close=90.0)  # exit should use THIS open
+
+        calls = {"sold": False}
+
+        def buy_then_sell_on_third_tick(tick, portfolio):
+            if "AAA" not in portfolio.positions:
+                return TraderDecision(ticker="AAA", decision="BUY", conviction=1.0)
+            if tick.timestamp == t2.timestamp and not calls["sold"]:
+                calls["sold"] = True
+                return TraderDecision(ticker="AAA", decision="SELL", conviction=1.0)
+            return TraderDecision(ticker="AAA", decision="HOLD", conviction=0.0)
+
+        harness = ReplayHarness(initial_balance=100_000)
+        result = harness.run([t0, t1, t2, t3], buy_then_sell_on_third_tick)
+
+        assert len(result.trades) == 1
+        trade = result.trades[0]
+        # Entry: BUY decided on t0, filled at t1's open (105.0).
+        assert trade.entry_price == 105.0
+        # Exit: SELL decided on t2 (close=200, tempting same-bar price),
+        # must fill at t3's open (90.0) -- NOT t2's close of 200.
+        assert trade.exit_price == 90.0
+        assert trade.exit_time == t3.timestamp
+
+    def test_decision_on_last_tick_is_never_filled(self):
+        """No future bar exists to execute against -- must not fabricate
+        a fill, same as a real trader who decides too late to see the
+        outcome in this dataset."""
+        ticks = [
+            self._tick("AAA", datetime(2024, 1, 2, 9, 30), open_=100.0, close=100.0),
+            self._tick("AAA", datetime(2024, 1, 2, 9, 31), open_=101.0, close=101.0),
+        ]
+        # always_buy_trader-style: only fires on the very last tick
+        def buy_only_on_last_tick(tick, portfolio):
+            if tick.timestamp == ticks[-1].timestamp:
+                return TraderDecision(ticker="AAA", decision="BUY", conviction=1.0)
+            return TraderDecision(ticker="AAA", decision="HOLD", conviction=0.0)
+
+        harness = ReplayHarness(initial_balance=100_000)
+        result = harness.run(ticks, buy_only_on_last_tick)
+
+        assert len(harness._portfolio.positions) == 0
+        assert result.final_equity == 100_000
+        # The attempt still counts as a decision even though it never fills
+        # -- matches the existing "decisions attempted" semantics.
+        assert result.n_decisions == 1
+
+    def test_multi_ticker_pending_fills_do_not_cross_contaminate(self):
+        """A pending BUY for AAA must fill on AAA's next tick, not on an
+        interleaved GOOG tick that happens to come next in the stream."""
+        aaa0 = self._tick("AAA", datetime(2024, 1, 2, 9, 30, 0), open_=50.0, close=50.0)
+        goog0 = self._tick("GOOG", datetime(2024, 1, 2, 9, 30, 1), open_=999.0, close=999.0)
+        aaa1 = self._tick("AAA", datetime(2024, 1, 2, 9, 31, 0), open_=55.0, close=55.0)
+
+        def buy_aaa_once(tick, portfolio):
+            if tick.ticker == "AAA" and "AAA" not in portfolio.positions:
+                return TraderDecision(ticker="AAA", decision="BUY", conviction=1.0)
+            return TraderDecision(ticker=tick.ticker, decision="HOLD", conviction=0.0)
+
+        harness = ReplayHarness(initial_balance=100_000)
+        harness.run([aaa0, goog0, aaa1], buy_aaa_once)
+
+        assert "AAA" in harness._portfolio.positions
+        # Must fill at aaa1's open (55.0), never at goog0's open (999.0)
+        # even though goog0 comes immediately after aaa0 in the stream.
+        assert harness._portfolio.positions["AAA"].entry_price == 55.0
+
+    def test_fill_at_next_open_false_restores_old_immediate_fill(self):
+        """Explicit opt-out for callers that need the old (more
+        optimistic) same-bar-close behavior, e.g. reproducing a
+        pre-2026-07-31 result."""
+        t0 = self._tick("AAA", datetime(2024, 1, 2, 9, 30), open_=100.0, close=110.0)
+        t1 = self._tick("AAA", datetime(2024, 1, 2, 9, 31), open_=120.0, close=125.0)
+
+        harness = ReplayHarness(initial_balance=100_000, fill_at_next_open=False)
+        harness.run([t0, t1], buy_hold_trader)
+
+        pos = harness._portfolio.positions["AAA"]
+        assert pos.entry_price == 110.0  # t0's own close, old behavior
+        assert pos.entry_time == t0.timestamp
+
+
 class TestReplayHarnessPositionSizing:
     """Position sizing and cash management."""
 

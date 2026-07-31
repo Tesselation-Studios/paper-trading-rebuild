@@ -205,16 +205,29 @@ class ReplayHarness:
         max_position_pct: float = 0.20,
         require_conviction: float = 0.0,
         cost_model: Any = None,
+        fill_at_next_open: bool = True,
     ):
         self.initial_balance = initial_balance
         self.commission_per_share = commission_per_share
         self.max_position_pct = max_position_pct
         self.require_conviction = require_conviction
         self.cost_model = cost_model
+        # 2026-07-31: was always filling at the SAME tick's close the
+        # decision was made on -- meaning the entry gate could evaluate
+        # "price above MA" (etc.) on a bar and then trade AT that bar's own
+        # close, the exact price the decision used to judge the bar in the
+        # first place. Real execution can't happen faster than the next
+        # bar. Default now fills at the NEXT tick for that ticker's open
+        # instead (a same-ticker lookup, not just market_data[i+1], since
+        # market_data may interleave multiple tickers). fill_at_next_open=
+        # False restores the old immediate-fill behavior for anyone who
+        # needs it (e.g. reproducing a pre-2026-07-31 result).
+        self.fill_at_next_open = fill_at_next_open
 
         # Reset per run
         self._portfolio: Portfolio = Portfolio(cash=initial_balance)
         self._trades: List[Trade] = []
+        self._pending_fills: Dict[str, Tuple[Tick, TraderDecision]] = {}
         self._equity: List[float] = []
         self._returns: List[float] = []
         self._decision_count: int = 0
@@ -246,6 +259,19 @@ class ReplayHarness:
                 if pos.ticker == tick.ticker:
                     pos.current_price = tick.close
 
+            if self.fill_at_next_open:
+                # Fill any decision made on the PRIOR tick for this same
+                # ticker now, at THIS tick's open -- the earliest realistic
+                # execution price for a decision informed by the prior
+                # bar's close. Must happen before calling the trader below
+                # so it sees the resulting portfolio state (a SELL that
+                # depends on "do I hold this position" needs the fill from
+                # the decision that opened it to have already landed).
+                pending = self._pending_fills.pop(tick.ticker, None)
+                if pending is not None:
+                    pending_tick, pending_decision = pending
+                    self._execute(pending_tick, pending_decision, fill_tick=tick)
+
             # Call the trader
             try:
                 decision = trader(tick, self._portfolio)
@@ -261,8 +287,16 @@ class ReplayHarness:
             if decision.decision != "HOLD":
                 self._decision_count += 1
 
-            # Execute the decision
-            self._execute(tick, decision)
+            if self.fill_at_next_open:
+                # Defer to the next same-ticker tick's open (above). A
+                # decision made on the LAST tick of the data for its ticker
+                # is never filled -- correct: there's no future bar to
+                # execute it against, same as a real trader who decided
+                # too late to see the outcome in this dataset.
+                if decision.decision != "HOLD":
+                    self._pending_fills[tick.ticker] = (tick, decision)
+            else:
+                self._execute(tick, decision)
 
             # Record equity snapshot
             current_equity = self._portfolio.total_equity
@@ -285,10 +319,19 @@ class ReplayHarness:
         self._returns = []
         self._timestamps = []
         self._decision_count = 0
+        self._pending_fills = {}
         self._tickers_seen = []
 
-    def _execute(self, tick: Tick, decision: TraderDecision) -> None:
-        """Simulate fill at close price.
+    def _execute(self, tick: Tick, decision: TraderDecision, fill_tick: Optional[Tick] = None) -> None:
+        """Simulate a fill.
+
+        tick is the bar the decision was made on. fill_tick, when given
+        (fill_at_next_open=True path), is the LATER same-ticker bar the
+        fill actually happens on -- price comes from its open, and its
+        timestamp becomes the trade's entry/exit time, not the decision
+        bar's. Without fill_tick (fill_at_next_open=False), fills
+        immediately at tick's own close -- the old, more optimistic
+        behavior, kept for callers that explicitly opt out.
 
         Conviction gating only applies to BUY (entry) decisions.
         SELL orders are risk management / exit decisions and always
@@ -309,12 +352,13 @@ class ReplayHarness:
                 self.require_conviction,
             )
 
-        price = tick.close
+        exec_tick = fill_tick if fill_tick is not None else tick
+        price = exec_tick.open if fill_tick is not None else exec_tick.close
 
         if decision.decision == "BUY":
-            self._execute_buy(tick, decision, price)
+            self._execute_buy(exec_tick, decision, price)
         elif decision.decision == "SELL":
-            self._execute_sell(tick, decision, price)
+            self._execute_sell(exec_tick, decision, price)
 
     def _execute_buy(self, tick: Tick, decision: TraderDecision, price: float) -> None:
         """Open a new long position or add to existing."""
