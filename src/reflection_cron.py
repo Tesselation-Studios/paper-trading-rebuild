@@ -24,6 +24,7 @@ import os
 import sys
 import json
 import time
+import sqlite3
 import argparse
 import logging
 import threading
@@ -45,6 +46,17 @@ _DB_DSN = os.getenv(
     "REFLECTION_DB_DSN",
     "host=docker.klo port=5433 dbname=trading user=trader",
 )
+
+# ── SQLite source of truth ───────────────────────────────────────────────────
+# trader.db is trader-stonks' live workspace-local DB (positions/decisions),
+# written directly by the executor on every fill. Postgres trading.trades is
+# populated by a separate Alpaca-order-matching sync (sync_exits_pg.py) that
+# leaves `pnl` NULL for any trade it fails to match — self-stats reads trader.db
+# directly instead so win/loss reflects reality, not sync coverage.
+STONKS_DB_PATH = Path(os.getenv(
+    "STONKS_TRADER_DB_PATH",
+    "/home/openclaw/.openclaw/workspace-trader-stonks/state/trader.db",
+))
 
 _KNOWN_SECTORS: Dict[str, str] = {
     "AAPL": "Technology", "MSFT": "Technology", "GOOGL": "Technology", "GOOG": "Technology",
@@ -149,53 +161,56 @@ def _ticker_sector(ticker: str) -> str:
 
 
 def _get_trades(agent_id: str, limit: int = 100, since: Optional[date] = None) -> List[dict]:
-    """Fetch trades for an agent from Postgres.
+    """Fetch closed trades from trader.db (SQLite, source of truth).
 
-    Returns list of dicts with trade fields.
+    trader.db is workspace-local to trader-stonks, the sole trading agent as of
+    2026-07-25 — agent_id is accepted for API compatibility but not filtered on.
+    Returns list of dicts with trade fields, including both `pnl` (dollar,
+    NULL for trades closed before 2026-07-30 when dollar recording was added)
+    and `return_pct` (percentage, populated for every closed trade) — callers
+    should prefer `return_pct` for win/loss determination.
     """
-    conn = _get_pg_conn()
-    if not conn:
+    if not STONKS_DB_PATH.exists():
+        log.warning("trader.db not found at %s", STONKS_DB_PATH)
         return []
 
-    from psycopg2.extras import RealDictCursor
     try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            if since:
-                cur.execute(
-                    """SELECT t.*, d.conviction as entry_conviction,
-                              d2.conviction as exit_conviction
-                       FROM trading.trades t
-                       LEFT JOIN trading.decisions d ON d.id = t.buy_decision_id
-                       LEFT JOIN trading.decisions d2 ON d2.id = t.sell_decision_id
-                       WHERE t.trader_id = %s
-                         AND t.exit_time IS NOT NULL
-                         AND t.exit_time >= %s::date
-                       ORDER BY t.exit_time DESC
-                       LIMIT %s""",
-                    (agent_id, since.isoformat(), limit),
-                )
-            else:
-                cur.execute(
-                    """SELECT t.*, d.conviction as entry_conviction,
-                              d2.conviction as exit_conviction
-                       FROM trading.trades t
-                       LEFT JOIN trading.decisions d ON d.id = t.buy_decision_id
-                       LEFT JOIN trading.decisions d2 ON d2.id = t.sell_decision_id
-                       WHERE t.trader_id = %s
-                         AND t.exit_time IS NOT NULL
-                       ORDER BY t.exit_time DESC
-                       LIMIT %s""",
-                    (agent_id, limit),
-                )
-            rows = cur.fetchall()
+        conn = sqlite3.connect(f"file:{STONKS_DB_PATH}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        query = """
+            SELECT p.rowid AS id, p.ticker, p.shares, p.entry_price, p.entry_time,
+                   p.sector, p.closed_at AS exit_time, p.realized_pnl AS pnl,
+                   p.realized_return_pct AS return_pct,
+                   (SELECT d.conviction FROM decisions d
+                    WHERE d.ticker = p.ticker AND d.decision = 'BUY'
+                      AND d.timestamp <= p.entry_time
+                    ORDER BY d.timestamp DESC LIMIT 1) AS entry_conviction
+            FROM positions p
+            WHERE p.status = 'closed'
+        """
+        params: List[Any] = []
+        if since:
+            query += " AND p.closed_at >= ?"
+            params.append(since.isoformat())
+        query += " ORDER BY p.closed_at DESC LIMIT ?"
+        params.append(limit)
+
+        rows = conn.execute(query, params).fetchall()
         conn.close()
-        return [dict(r) for r in rows]
+
+        trades = []
+        for r in rows:
+            d = dict(r)
+            for key in ("entry_time", "exit_time"):
+                if d.get(key):
+                    try:
+                        d[key] = datetime.fromisoformat(d[key])
+                    except ValueError:
+                        d[key] = None
+            trades.append(d)
+        return trades
     except Exception as e:
-        log.warning("Failed to fetch trades for %s: %s", agent_id, e)
-        try:
-            conn.close()
-        except Exception:
-            pass
+        log.warning("Failed to fetch trades from trader.db for %s: %s", agent_id, e)
         return []
 
 
@@ -279,6 +294,23 @@ def _get_agents() -> List[str]:
 # Stats Computation
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _is_win(t: dict) -> bool:
+    """Win/loss determination — prefers dollar pnl, falls back to return_pct.
+
+    Dollar `pnl` is NULL for trades closed before 2026-07-30 (recording gap,
+    never backfilled). Falling straight to `(t.get("pnl") or 0) > 0` silently
+    counts every such trade as a loss. `return_pct` is populated for all
+    closed trades, so use it whenever pnl is missing.
+    """
+    pnl = t.get("pnl")
+    if pnl is not None:
+        return float(pnl) > 0
+    pct = t.get("return_pct")
+    if pct is not None:
+        return float(pct) > 0
+    return False
+
+
 def compute_trade_stats(trades: List[dict], signals: Optional[Dict[int, List[dict]]] = None) -> dict:
     """Compute comprehensive trading stats from a list of trade dicts.
 
@@ -310,8 +342,8 @@ def compute_trade_stats(trades: List[dict], signals: Optional[Dict[int, List[dic
 
     # ── Today stats ────────────────────────────────────────────────────
     today_pnl = sum(float(t.get("pnl", 0) or 0) for t in today_trades)
-    today_wins = [t for t in today_trades if (t.get("pnl") or 0) > 0]
-    today_losses = [t for t in today_trades if (t.get("pnl") or 0) <= 0]
+    today_wins = [t for t in today_trades if _is_win(t)]
+    today_losses = [t for t in today_trades if not _is_win(t)]
     today_win_rate = round(len(today_wins) / max(len(today_trades), 1), 4)
 
     today_hold_times = []
@@ -338,13 +370,16 @@ def compute_trade_stats(trades: List[dict], signals: Optional[Dict[int, List[dic
     }
 
     # ── Rolling stats (all closed trades) ──────────────────────────────
-    closed_trades = [t for t in trades if t.get("exit_time") is not None and t.get("pnl") is not None]
+    closed_trades = [
+        t for t in trades
+        if t.get("exit_time") is not None and (t.get("pnl") is not None or t.get("return_pct") is not None)
+    ]
     closed_trades.sort(key=lambda t: t.get("exit_time", datetime.min))
 
     def _rolling_wr(trades_slice: List[dict]) -> Optional[float]:
         if not trades_slice:
             return None
-        wins = sum(1 for t in trades_slice if (t.get("pnl") or 0) > 0)
+        wins = sum(1 for t in trades_slice if _is_win(t))
         return round(wins / len(trades_slice), 4)
 
     rolling_stats = {
@@ -363,7 +398,7 @@ def compute_trade_stats(trades: List[dict], signals: Optional[Dict[int, List[dic
             if not tid:
                 continue
             trade_signals = signals.get(tid, [])
-            is_win = (t.get("pnl") or 0) > 0
+            is_win = _is_win(t)
             for sig in trade_signals:
                 sname = sig.get("signal_name", "unknown")
                 if sname not in by_signal:
@@ -389,8 +424,8 @@ def compute_trade_stats(trades: List[dict], signals: Optional[Dict[int, List[dic
     by_sector: Dict[str, Dict[str, float]] = {}
     for t in trades:
         ticker = t.get("ticker", "")
-        sector = _ticker_sector(ticker)
-        is_win = (t.get("pnl") or 0) > 0
+        sector = t.get("sector") or _ticker_sector(ticker)
+        is_win = _is_win(t)
         if sector not in by_sector:
             by_sector[sector] = {"wins": 0, "losses": 0, "total": 0}
         by_sector[sector]["total"] += 1
@@ -428,7 +463,7 @@ def compute_trade_stats(trades: List[dict], signals: Optional[Dict[int, List[dic
             cv = float(conv)
         except (TypeError, ValueError):
             continue
-        is_win = (t.get("pnl") or 0) > 0
+        is_win = _is_win(t)
         if cv < 0.3:
             confidence_buckets["very_low_<0.3"].append(is_win)
         elif cv < 0.5:
@@ -561,11 +596,9 @@ def generate_reflection(agent_id: str, trades: List[dict] = None) -> str:
     if trades is None:
         trades = _get_trades(agent_id, limit=100, since=date.today())
 
-    # Fetch signals for trade IDs
-    trade_ids = [t.get("id") for t in trades if t.get("id")]
-    signals = _get_trade_signals(trade_ids) if trade_ids else {}
-
-    stats = compute_trade_stats(trades, signals)
+    # trade_signals lives in Postgres and has no SQLite equivalent for
+    # trader.db-sourced trades — by_signal is intentionally empty.
+    stats = compute_trade_stats(trades, signals=None)
 
     today_str = date.today().isoformat()
     ts = stats["today_stats"]
@@ -653,15 +686,15 @@ def generate_reflection(agent_id: str, trades: List[dict] = None) -> str:
 def generate_reflection_json(agent_id: str, trades: List[dict] = None) -> dict:
     """Generate reflection stats as JSON (for GET /self/stats endpoint).
 
-    If trades is None, fetches from Postgres.
+    If trades is None, fetches from trader.db.
     """
     if trades is None:
         trades = _get_trades(agent_id, limit=100, since=date.today())
 
-    trade_ids = [t.get("id") for t in trades if t.get("id")]
-    signals = _get_trade_signals(trade_ids) if trade_ids else {}
-
-    stats = compute_trade_stats(trades, signals)
+    # trade_signals lives in Postgres and has no SQLite equivalent for
+    # trader.db-sourced trades — by_signal is intentionally empty until
+    # signal-level logging exists in trader.db itself.
+    stats = compute_trade_stats(trades, signals=None)
 
     stats["agent_id"] = agent_id
     stats["date"] = date.today().isoformat()
@@ -862,9 +895,7 @@ def main():
             print(reflection)
 
         if not args.dry_run and not args.json:
-            trade_ids = [t.get("id") for t in trades if t.get("id")]
-            signals = _get_trade_signals(trade_ids) if trade_ids else {}
-            stats = compute_trade_stats(trades, signals)
+            stats = compute_trade_stats(trades, signals=None)
             write_reflection(args.agent, reflection, stats)
             log.info("Reflection written for %s", args.agent)
 
