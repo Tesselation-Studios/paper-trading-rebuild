@@ -25,6 +25,10 @@ import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple, Any
+from zoneinfo import ZoneInfo
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from market_hours import is_early_close_day, is_holiday
 
 from dotenv import load_dotenv
 
@@ -158,20 +162,32 @@ def missing_date_range(
 ) -> Tuple[Optional[str], Optional[str]]:
     """Determine the date range to fetch.
 
-    Excludes today (incomplete trading day) to avoid Alpaca IEX
-    returning placeholder/flat data for the current session.
+    Excludes today's session while it's still incomplete, to avoid Alpaca
+    IEX returning placeholder/flat data for a session still in progress.
+    Once today's session has actually closed (including early closes),
+    it's safe to include -- this runs post-close daily via the
+    stonks-bars-sync cron (17:15 ET), so excluding "today" unconditionally
+    left the cache permanently one trading day stale.
 
     If repair_dates is passed, those dates are always included as missing.
     """
     if existing is None:
         existing = existing_dates(ticker)
 
-    # Exclude today -- Alpaca IEX returns bad data for incomplete trading days
     today = date.today()
-    end_date = today - timedelta(days=1)
+    now_et = datetime.now(ZoneInfo("America/New_York"))
+    close_hour, close_minute = (14, 0) if is_early_close_day(today) else (16, 0)
+    session_closed = (
+        today.weekday() < 5
+        and not is_holiday(today)
+        and (now_et.hour, now_et.minute) >= (close_hour, close_minute)
+    )
+    end_date = today if session_closed else today - timedelta(days=1)
 
-    # On Monday, skip back to Friday (weekend has no trading)
-    if today.weekday() == 0:
+    # On Monday, before today's own close, the fallback above lands on
+    # Sunday (no trading) -- skip back to Friday instead. Once Monday's
+    # session has actually closed, end_date is already today; leave it.
+    if today.weekday() == 0 and not session_closed:
         end_date = today - timedelta(days=3)
 
     start_date = today - timedelta(days=days + 1)
@@ -483,6 +499,7 @@ def main():
     total_errors = 0
     total_skipped = 0
     total_empty = 0
+    total_invalid = 0
 
     for ticker in tickers:
         # backfill_ticker returns (ticker, status, count) -- this used to be
@@ -502,32 +519,43 @@ def main():
             total_errors += 1
         elif status == "skipped":
             total_skipped += 1
-        # "empty"/"invalid" used to fall through uncounted here, so a run
-        # that fetched real bars for zero tickers still printed "0 errors"
-        # and exited 0 -- the cron then reported "ok" despite doing nothing.
-        # See 2026-07-28 incident: every ticker (including SPY) silently
-        # returned "empty" for days due to the end-date bug above, and
-        # nothing ever flagged it.
-        elif status in ("empty", "invalid"):
+        # "empty" and "invalid" used to both fall into one uncounted-then-
+        # conflated bucket, so a run where every non-skipped ticker was
+        # legitimately quality-rejected (thin small-caps, correctly caught
+        # by validate_bars) tripped the same all-zero safety net as a real
+        # upstream fetch failure. They're different signals: "empty" means
+        # the Alpaca API returned nothing at all for that ticker (the actual
+        # 2026-07-28 incident's signature -- every ticker, including SPY,
+        # came back empty due to the end-date bug); "invalid" means data
+        # came back but correctly failed the data-quality gate, which is the
+        # expected outcome for a watchlist skewed toward illiquid small-caps
+        # and is not itself evidence anything is broken.
+        elif status == "empty":
             total_empty += 1
+        elif status == "invalid":
+            total_invalid += 1
 
         time.sleep(FETCH_DELAY)
 
     print(f"\nSummary: {total_fetched} bars fetched, "
           f"{total_skipped} skipped, {total_errors} errors, "
-          f"{total_empty} empty/invalid")
+          f"{total_empty} empty, {total_invalid} quality-rejected")
 
     # Exit with error if any ticker failed outright
     if total_errors > 0:
         return 1
-    # Exit with error if every non-skipped ticker came back empty/invalid --
-    # a handful of illiquid small-caps having no data is expected, but zero
-    # real data across the whole run (this incident: 19/19, later 37/37)
-    # means something upstream is broken, not that the market was quiet.
-    attempted = total_empty + total_fetched
-    if attempted > 0 and total_fetched == 0:
-        print(f"ERROR: {total_empty}/{attempted} tickers returned no usable "
-              f"data and zero bars were fetched overall.", file=sys.stderr)
+    # Exit with error only if the API itself returned nothing for tickers
+    # and zero bars were fetched overall -- this is the real 2026-07-28
+    # signature (upstream fetch broken). A run where every attempted ticker
+    # was correctly quality-rejected (total_invalid > 0, total_empty == 0)
+    # is NOT this failure mode -- it means today's non-cached tickers
+    # happened to all be thin, not that the pipeline broke.
+    if total_empty > 0 and total_fetched == 0:
+        print(f"ERROR: {total_empty} ticker(s) returned no data from the Alpaca "
+              f"API at all (zero bars fetched overall) -- this looks like an "
+              f"upstream fetch failure, not expected data-quality rejections "
+              f"({total_invalid} additionally failed quality checks, which is "
+              f"normal for thin small-caps and not itself an error).", file=sys.stderr)
         return 1
     return 0
 

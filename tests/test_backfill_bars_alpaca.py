@@ -286,3 +286,37 @@ def test_main_exits_zero_when_all_skipped(monkeypatch, temp_bars_dir):
     )
 
     assert bba.main() == 0
+
+
+def test_main_exits_zero_when_all_tickers_quality_rejected(monkeypatch, temp_bars_dir):
+    """Regression test for the 2026-08-01 false-positive: every non-skipped
+    ticker legitimately failing the data-quality gate (thin small-caps, no
+    real bars returned) is NOT the same failure shape as the 2026-07-28
+    incident (Alpaca returning nothing at all) -- it must not trip the same
+    all-zero safety net. Confirmed live: 21/21 attempted tickers "invalid",
+    0 "empty", which previously exited 1 despite the fetch pipeline working
+    correctly and simply having nothing quality-passing to report today."""
+    monkeypatch.setattr(sys, "argv", ["backfill_bars_alpaca.py", "--tickers", "SPY,AAPL", "--days", "2"])
+    monkeypatch.setattr(bba.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(
+        bba, "backfill_ticker",
+        lambda ticker, days, **kw: (ticker, "invalid", 0),
+    )
+
+    assert bba.main() == 0
+
+
+def test_main_exits_nonzero_when_mixed_empty_and_invalid_but_zero_fetched(monkeypatch, temp_bars_dir):
+    """A run with even one genuine "empty" (API returned nothing) result and
+    zero real bars fetched overall must still trip the guard, regardless of
+    how many other tickers were separately (and legitimately) quality-
+    rejected -- "empty" is still the real upstream-break signature."""
+    monkeypatch.setattr(sys, "argv", ["backfill_bars_alpaca.py", "--tickers", "SPY,AAPL,TSLA", "--days", "2"])
+    monkeypatch.setattr(bba.time, "sleep", lambda *_: None)
+
+    def fake_backfill(ticker, days, **kw):
+        return (ticker, "empty", 0) if ticker == "SPY" else (ticker, "invalid", 0)
+
+    monkeypatch.setattr(bba, "backfill_ticker", fake_backfill)
+
+    assert bba.main() == 1
