@@ -18,6 +18,7 @@ sys.path.insert(0, str(SRC_DIR))
 
 import ml_signal  # noqa: E402
 import regime_backtest  # noqa: E402
+import regime_detector  # noqa: E402
 
 
 def _synthetic_ohlcv(n=60, seed=0):
@@ -38,6 +39,15 @@ def _synthetic_bars(n=200, seed=0):
     columns."""
     df = _synthetic_ohlcv(n=n, seed=seed)
     df["timestamp"] = pd.date_range("2026-06-01", periods=n, freq="5min")
+    return df
+
+
+def _synthetic_daily_bars(n=120, seed=0):
+    """Same shape as _synthetic_bars but daily-spaced -- enough rows to
+    clear RegimeDetector._extract_features's >=51-row warmup with room to
+    spare for a k=2 fit (needs >= k*10 feature vectors)."""
+    df = _synthetic_ohlcv(n=n, seed=seed)
+    df["timestamp"] = pd.date_range("2026-01-01", periods=n, freq="D")
     return df
 
 
@@ -89,6 +99,32 @@ class _FakeConn:
 
     def close(self):
         self.closed = True
+
+
+class _FakeKMeansResult:
+    def __init__(self, cluster, label, confidence, features):
+        self.cluster = cluster
+        self.label = label
+        self.confidence = confidence
+        self.features = features
+
+
+class _FakeKMeansDetector:
+    """Canned _extract_features/predict, same spirit as _FakeHMM -- no real
+    sklearn fit needed to exercise walk_forward_kmeans's windowing logic."""
+    def __init__(self, label="momentum_bull", confidence=0.8, min_rows=51):
+        self.label = label
+        self.confidence = confidence
+        self.min_rows = min_rows
+
+    def _extract_features(self, data, symbols):
+        if len(data) < self.min_rows:
+            return [], []
+        names = ["SPY_mom_5d"]
+        return [[0.0] for _ in range(len(data) - 50)], names
+
+    def predict(self, current_features):
+        return _FakeKMeansResult(cluster=0, label=self.label, confidence=self.confidence, features=current_features)
 
 
 class TestCompressTo5MinBars:
@@ -379,3 +415,201 @@ class TestParityCheck:
             "SPY", df, model, scaler, sustainable_state=0, n_samples=2,
         ))
         assert all(r["agree"] is False for r in results)
+
+
+class TestDirectionCorrectAndGeneralizedScoring:
+    def test_direction_correct_up_down_flat_none(self):
+        assert regime_backtest._direction_correct("up", 1.0, 0.1) is True
+        assert regime_backtest._direction_correct("up", -1.0, 0.1) is False
+        assert regime_backtest._direction_correct("down", -1.0, 0.1) is True
+        assert regime_backtest._direction_correct("down", 1.0, 0.1) is False
+        assert regime_backtest._direction_correct("flat", 0.05, 0.1) is True
+        assert regime_backtest._direction_correct("flat", 0.5, 0.1) is False
+        assert regime_backtest._direction_correct(None, 1.0, 0.1) is None
+
+    def _mixed_results_df(self):
+        return pd.DataFrame({
+            "timestamp": pd.date_range("2026-01-01", periods=6, freq="D"),
+            "regime": ["momentum_bull", "momentum_bull", "momentum_bear", "mean_reversion", "volatility_spike", "volatility_spike"],
+            "confidence": [0.8, 0.85, 0.6, 0.4, 0.2, 0.25],
+            "hmm_state": [None] * 6,
+            "log_score": [None] * 6,
+            "horizon_bars": [5] * 6,
+            "fwd_return_pct": [1.0, 0.5, -1.0, 0.02, 3.0, -3.0],
+            "mfe_pct": [1.5, 0.6, 0.1, 0.1, 3.5, 0.2],
+            "mae_pct": [-0.1, -0.1, -1.5, -0.1, -0.3, -3.5],
+        })
+
+    def test_none_direction_label_in_distribution_excluded_from_accuracy(self):
+        df = self._mixed_results_df()
+        summary = regime_backtest.summarize(
+            df, total_bars=100,
+            regime_labels=regime_backtest._KMEANS_REGIME_LABELS,
+            direction_map=regime_backtest._KMEANS_DIRECTION_MAP,
+            confidence_buckets=regime_backtest._KMEANS_CONFIDENCE_BUCKETS,
+        )
+        dist = summary["horizons"][5]["regime_distribution"]
+        # volatility_spike (direction=None) still appears in the distribution...
+        assert dist["volatility_spike"]["n"] == 2
+        # ...but every calibration bucket's accuracy is computed only from
+        # rows with a non-None direction -- the two volatility_spike rows
+        # (confidence 0.2, 0.25, both in the [0.0, 0.3) bucket) contribute
+        # nothing to that bucket's directional_accuracy.
+        calib = summary["horizons"][5]["confidence_calibration"]
+        low_bucket = next(b for b in calib if b["range"] == [0.0, 0.3])
+        assert low_bucket["n"] == 2  # both volatility_spike rows land here
+        assert low_bucket["directional_accuracy"] is None  # no directional ground truth in this bucket
+
+    def test_omitting_new_params_reproduces_default_hmm_behavior(self):
+        # Regression pin: summarize()'s default args must still score the
+        # HMM's 3-label vocabulary exactly as before this generalization.
+        df = pd.DataFrame({
+            "timestamp": pd.date_range("2026-06-01", periods=4, freq="5min"),
+            "regime": ["SUSTAINABLE", "EXHAUSTED", "CHOPPY", "SUSTAINABLE"],
+            "confidence": [0.5, 0.6, 0.55, 0.7],
+            "hmm_state": [0, 1, 1, 0],
+            "log_score": [-10, -11, -9, -12],
+            "horizon_bars": [12, 12, 12, 12],
+            "fwd_return_pct": [1.0, -0.5, 0.02, 0.8],
+            "mfe_pct": [1.5, 0.1, 0.1, 1.0],
+            "mae_pct": [-0.2, -1.0, -0.1, -0.3],
+        })
+        summary = regime_backtest.summarize(df, total_bars=1000)
+        dist = summary["horizons"][12]["regime_distribution"]
+        assert set(dist.keys()) == {"SUSTAINABLE", "EXHAUSTED", "CHOPPY"}
+        assert dist["SUSTAINABLE"]["n"] == 2
+        assert dist["EXHAUSTED"]["n"] == 1
+        assert dist["CHOPPY"]["n"] == 1
+
+
+class TestWalkForwardCoreRegression:
+    def test_hmm_columns_always_populated(self):
+        df = _synthetic_bars(n=150, seed=11)
+        results = regime_backtest.walk_forward(
+            df, _FakeHMM(state=0, log_score=-42.0), _IdentityScaler(), sustainable_state=0,
+            horizons=(5,), lookback_bars=50, warmup_bars=30, stride=20,
+        )
+        assert not results.empty
+        assert results["hmm_state"].notna().all()
+        assert results["log_score"].notna().all()
+        assert "cluster" not in results.columns
+
+    def test_matches_pre_refactor_row_shape(self):
+        # Same fixture/assertions as TestWalkForward.test_respects_warmup_and_stride
+        # -- pinned here too as a belt-and-suspenders check that extracting
+        # _walk_forward_core didn't change walk_forward()'s public behavior.
+        df = _synthetic_bars(n=200, seed=5)
+        results = regime_backtest.walk_forward(
+            df, _FakeHMM(state=0, log_score=-50.0), _IdentityScaler(), sustainable_state=0,
+            horizons=(5, 10), lookback_bars=50, warmup_bars=30, stride=10,
+        )
+        assert not results.empty
+        expected_positions = list(range(30, 200 - 10, 10))
+        expected_timestamps = sorted(df.iloc[p]["timestamp"] for p in expected_positions)
+        for horizon in (5, 10):
+            actual = sorted(results.loc[results["horizon_bars"] == horizon, "timestamp"].unique())
+            assert list(actual) == [pd.Timestamp(t) for t in expected_timestamps]
+
+
+class TestLoadDailyBarsFromPg:
+    def test_renames_date_to_timestamp_and_casts_dtypes(self):
+        rows = [
+            (pd.Timestamp("2026-01-01") + pd.Timedelta(days=i),
+             100 + i, 101 + i, 99 + i, 100.5 + i, 1000 + i)
+            for i in range(60)
+        ]
+        conn = _FakeConn(rows)
+        df = regime_backtest.load_daily_bars_from_pg("SPY", conn=conn, min_horizon_bars=1)
+        assert len(df) == 60
+        assert list(df.columns) == ["timestamp", "open", "high", "low", "close", "volume"]
+        assert df["close"].dtype == float
+        assert conn.closed is False  # caller-owned connection
+
+    def test_raises_on_insufficient_rows(self):
+        rows = [(pd.Timestamp("2026-01-01"), 100, 101, 99, 100.5, 1000)]
+        conn = _FakeConn(rows)
+        with pytest.raises(ValueError):
+            regime_backtest.load_daily_bars_from_pg("SPY", conn=conn, min_horizon_bars=5)
+
+
+class TestDfToRecords:
+    def test_round_trip_shape(self):
+        df = _synthetic_daily_bars(n=5, seed=1)
+        records = regime_backtest._df_to_records(df, symbol="SPY")
+        assert len(records) == 5
+        for rec, row in zip(records, df.itertuples()):
+            assert rec["symbol"] == "SPY"
+            assert rec["date"] == pd.Timestamp(row.timestamp).strftime("%Y-%m-%d")
+            assert rec["close"] == pytest.approx(row.close)
+            assert rec["volume"] == pytest.approx(row.volume)
+
+
+class TestKmeansInferRegime:
+    def test_valid_window_returns_local_regime(self):
+        df = _synthetic_daily_bars(n=120, seed=2)
+        detector = regime_detector.RegimeDetector(k=2, model_path="")
+        detector.fit(regime_backtest._df_to_records(df, "SPY"), symbols=["SPY"])
+
+        result = regime_backtest.kmeans_infer_regime(df, detector, symbol="SPY")
+        assert result["source"] == "local"
+        assert result["regime"] in regime_detector.REGIME_LABELS.values()
+        assert 0.0 <= result["confidence"] <= 1.0
+        assert "cluster" in result
+
+    def test_too_short_window_returns_error_source(self):
+        df = _synthetic_daily_bars(n=120, seed=2)
+        detector = regime_detector.RegimeDetector(k=2, model_path="")
+        detector.fit(regime_backtest._df_to_records(df, "SPY"), symbols=["SPY"])
+
+        short_window = df.iloc[:30]  # under the 51-row internal warmup
+        result = regime_backtest.kmeans_infer_regime(short_window, detector, symbol="SPY")
+        assert result["source"] == "error"
+
+
+class TestWalkForwardKmeans:
+    def test_warmup_offset_and_nan_hmm_columns(self):
+        df = _synthetic_daily_bars(n=150, seed=6)
+        detector = _FakeKMeansDetector(label="momentum_bull", confidence=0.75)
+        results = regime_backtest.walk_forward_kmeans(
+            df, detector, symbol="SPY", horizons=(5,), lookback_bars=60,
+            warmup_bars=55, stride=20,
+        )
+        assert not results.empty
+        expected_positions = list(range(55, 150 - 5, 20))
+        expected_timestamps = sorted(df.iloc[p]["timestamp"] for p in expected_positions)
+        actual = sorted(results["timestamp"].unique())
+        assert list(actual) == [pd.Timestamp(t) for t in expected_timestamps]
+        assert results["hmm_state"].isna().all()
+        assert results["log_score"].isna().all()
+        assert (results["cluster"] == 0).all()
+        assert (results["regime"] == "momentum_bull").all()
+
+
+class TestWriteReportCandidateSlug:
+    def _minimal_summary_and_df(self):
+        df = pd.DataFrame({
+            "timestamp": pd.date_range("2026-06-01", periods=1, freq="D"),
+            "regime": ["SUSTAINABLE"], "confidence": [0.5], "hmm_state": [0],
+            "log_score": [-10], "horizon_bars": [5], "fwd_return_pct": [1.0],
+            "mfe_pct": [1.0], "mae_pct": [-0.1],
+        })
+        summary = regime_backtest.summarize(df, total_bars=100)
+        return df, summary
+
+    def test_default_filename_unchanged(self, tmp_path):
+        df, summary = self._minimal_summary_and_df()
+        csv_path, md_path = regime_backtest.write_report(
+            df, summary, "SPY", out_dir=tmp_path, run_date="2026-08-10",
+        )
+        assert csv_path.name == "regime_backtest_SPY_2026-08-10.csv"
+        assert md_path.name == "regime_backtest_SPY_2026-08-10.md"
+
+    def test_candidate_slug_produces_distinct_filename(self, tmp_path):
+        df, summary = self._minimal_summary_and_df()
+        csv_path, md_path = regime_backtest.write_report(
+            df, summary, "SPY", out_dir=tmp_path, run_date="2026-08-10",
+            candidate_slug="kmeans", description="K-Means test report",
+        )
+        assert csv_path.name == "regime_backtest_SPY_kmeans_2026-08-10.csv"
+        assert md_path.name == "regime_backtest_SPY_kmeans_2026-08-10.md"
+        assert "K-Means test report" in md_path.read_text()

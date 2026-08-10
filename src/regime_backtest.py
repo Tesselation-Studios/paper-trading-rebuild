@@ -20,8 +20,17 @@ this model. local_infer_regime() reuses the real functions from ml_signal
 local and live paths can't silently drift apart. Use parity_check() to
 spot-verify that empirically against the live worker.
 
+Phase C (2026-08-10) generalized the walk-forward/scoring/reporting core so
+it can score candidates other than the live HMM -- see kmeans_infer_regime()/
+walk_forward_kmeans() for the K-Means adapter (evaluates the orphaned
+src.regime_detector.RegimeDetector on daily bars) and the regime_labels/
+direction_map/confidence_buckets params on summarize() and its helpers.
+local_infer_regime()/walk_forward() (the HMM path) are unchanged; every new
+parameter defaults to reproducing their exact prior behavior.
+
 Usage:
     python3 scripts/backtest_regime.py --symbol SPY
+    python3 scripts/backtest_regime_kmeans.py --symbol SPY
 """
 from __future__ import annotations
 
@@ -42,6 +51,7 @@ if _PROJECT_SRC not in sys.path:
     sys.path.insert(0, _PROJECT_SRC)
 
 import ml_signal  # noqa: E402
+import regime_detector  # noqa: E402
 from db.connection import get_connection  # noqa: E402
 from metrics import compute_win_rate  # noqa: E402
 from validation import is_significant  # noqa: E402
@@ -56,6 +66,22 @@ DEFAULT_STRIDE = 12
 
 _REGIME_LABELS = ("SUSTAINABLE", "EXHAUSTED", "CHOPPY")
 _CONFIDENCE_BUCKETS = ((0.0, 0.3), (0.3, 0.5), (0.5, 0.7), (0.7, 0.93))
+_HMM_DIRECTION_MAP = {"SUSTAINABLE": "up", "EXHAUSTED": "down", "CHOPPY": "flat"}
+
+# K-Means candidate (src.regime_detector.RegimeDetector) -- daily bars, no gRPC.
+# RegimeDetector._extract_features needs >=51 rows (range(50, len(closes)))
+# before it emits even one feature vector; 55 is a small buffer above that.
+KMEANS_MIN_WARMUP_BARS = 55
+DEFAULT_DAILY_HORIZONS = (1, 5, 20)  # ~1 day / 1 week / 1 month
+_KMEANS_REGIME_LABELS = tuple(regime_detector.REGIME_LABELS.values())
+_KMEANS_DIRECTION_MAP = {
+    "momentum_bull": "up",
+    "momentum_bear": "down",
+    "mean_reversion": "flat",
+    "low_vol_drift": "flat",
+    "volatility_spike": None,  # no directional expectation -- excluded from accuracy scoring
+}
+_KMEANS_CONFIDENCE_BUCKETS = ((0.0, 0.3), (0.3, 0.5), (0.5, 0.7), (0.7, 1.01))
 
 
 # ---------------------------------------------------------------------------
@@ -133,6 +159,58 @@ def load_bars_from_pg(
         raise ValueError(
             f"Not enough bars for {symbol} after 5-min compression: got {len(df)}, "
             f"need at least {min_rows} (warmup {WARMUP_BARS} + horizon {min_horizon_bars})"
+        )
+    return df
+
+
+def load_daily_bars_from_pg(
+    symbol: str,
+    start=None,
+    end=None,
+    conn=None,
+    min_horizon_bars: Optional[int] = None,
+) -> pd.DataFrame:
+    """Read-only load of market_data.bars_1d for one symbol, sorted ascending
+    by date. Unlike load_bars_from_pg, no compression step is needed --
+    bars_1d is already one row per day. `date` is renamed to `timestamp` so
+    nothing downstream needs to know the cadence changed. `conn` is
+    injectable, same convention as load_bars_from_pg."""
+    owns_conn = conn is None
+    if owns_conn:
+        conn = get_connection()
+    try:
+        cur = conn.cursor()
+        sql = (
+            "SELECT date, open, high, low, close, volume "
+            "FROM market_data.bars_1d WHERE symbol = %s"
+        )
+        params = [symbol]
+        if start is not None:
+            sql += " AND date >= %s"
+            params.append(start)
+        if end is not None:
+            sql += " AND date <= %s"
+            params.append(end)
+        sql += " ORDER BY date"
+        cur.execute(sql, params)
+        rows = cur.fetchall()
+        cur.close()
+    finally:
+        if owns_conn:
+            conn.close()
+
+    df = pd.DataFrame(rows, columns=["timestamp", "open", "high", "low", "close", "volume"])
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    for col in ("open", "high", "low", "close", "volume"):
+        df[col] = df[col].astype(float)
+    df = df.sort_values("timestamp").reset_index(drop=True)
+
+    min_horizon_bars = max(DEFAULT_DAILY_HORIZONS) if min_horizon_bars is None else min_horizon_bars
+    min_rows = KMEANS_MIN_WARMUP_BARS + min_horizon_bars + 1
+    if len(df) < min_rows:
+        raise ValueError(
+            f"Not enough daily bars for {symbol}: got {len(df)}, "
+            f"need at least {min_rows} (warmup {KMEANS_MIN_WARMUP_BARS} + horizon {min_horizon_bars})"
         )
     return df
 
@@ -256,6 +334,51 @@ def local_infer_regime(window_df: pd.DataFrame, model, scaler, sustainable_state
 
 
 # ---------------------------------------------------------------------------
+# K-Means candidate (src.regime_detector.RegimeDetector) -- local, no gRPC
+# ---------------------------------------------------------------------------
+
+def _df_to_records(bars_df: pd.DataFrame, symbol: str = "SPY") -> list[dict]:
+    """Convert a bars_df window into the {symbol, date, open, high, low,
+    close, volume} dicts RegimeDetector.fit()/._extract_features() expect."""
+    records = []
+    for row in bars_df.itertuples():
+        records.append({
+            "symbol": symbol,
+            "date": pd.Timestamp(row.timestamp).strftime("%Y-%m-%d"),
+            "open": float(row.open),
+            "high": float(row.high),
+            "low": float(row.low),
+            "close": float(row.close),
+            "volume": float(row.volume),
+        })
+    return records
+
+
+def kmeans_infer_regime(window_df: pd.DataFrame, detector, symbol: str = "SPY") -> dict:
+    """K-Means equivalent of local_infer_regime(): extracts the same feature
+    set the detector was trained on and classifies the most recent bar in
+    window_df. Returns source == "error" (not a spurious all-zero-feature
+    prediction) on windows too short for RegimeDetector._extract_features to
+    emit any feature vector."""
+    records = _df_to_records(window_df, symbol)
+    features_list, names = detector._extract_features(records, [symbol])
+    if not features_list:
+        return {
+            "regime": _KMEANS_REGIME_LABELS[0], "confidence": 0.0, "details": {},
+            "source": "error", "error": "not enough bars after K-Means feature warmup",
+        }
+    current_features = dict(zip(names, features_list[-1]))
+    result = detector.predict(current_features)
+    return {
+        "regime": result.label,
+        "confidence": result.confidence,
+        "details": result.features,
+        "source": "local",
+        "cluster": result.cluster,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Opt-in gRPC parity check
 # ---------------------------------------------------------------------------
 
@@ -340,6 +463,62 @@ def compute_forward_outcome(bars_df: pd.DataFrame, idx: int, horizon_bars: int) 
 # Walk-forward loop
 # ---------------------------------------------------------------------------
 
+def _walk_forward_core(
+    bars_df: pd.DataFrame,
+    infer_fn,
+    horizons,
+    lookback_bars: int,
+    warmup_bars: int,
+    stride: Optional[int] = None,
+) -> pd.DataFrame:
+    """Slides an evaluation point across bars_df at `stride`-bar steps.
+    At each point, runs infer_fn() on a trailing lookback window, then
+    computes forward outcomes at each configured horizon. Produces one row
+    per (evaluation point x horizon) -- the raw table everything else reads
+    from. infer_fn's extra diagnostic keys (e.g. hmm_state/log_score,
+    cluster) pass through into the row dict; pandas unions columns across
+    rows, NaN-filling whatever a given candidate doesn't provide."""
+    stride = stride or min(horizons)
+    max_horizon = max(horizons)
+    rows = []
+
+    for i in range(warmup_bars, len(bars_df) - max_horizon, stride):
+        window = bars_df.iloc[max(0, i - lookback_bars + 1): i + 1]
+        call = infer_fn(window)
+        if call["source"] == "error":
+            continue
+        for h in horizons:
+            outcome = compute_forward_outcome(bars_df, i, h)
+            if outcome is None:
+                continue
+            row = {
+                "timestamp": bars_df.iloc[i]["timestamp"],
+                "regime": call["regime"],
+                "confidence": call["confidence"],
+                "horizon_bars": h,
+                "fwd_return_pct": outcome.fwd_return_pct,
+                "mfe_pct": outcome.mfe_pct,
+                "mae_pct": outcome.mae_pct,
+            }
+            if "hmm_state" in call or "log_score" in call:
+                row["hmm_state"] = call.get("hmm_state")
+                row["log_score"] = call.get("log_score")
+            if "cluster" in call:
+                row["cluster"] = call.get("cluster")
+            rows.append(row)
+
+    columns = [
+        "timestamp", "regime", "confidence", "hmm_state", "log_score",
+        "horizon_bars", "fwd_return_pct", "mfe_pct", "mae_pct",
+    ]
+    df = pd.DataFrame(rows)
+    for col in columns:
+        if col not in df.columns:
+            df[col] = pd.NA
+    extra_cols = [c for c in df.columns if c not in columns]
+    return df[columns + extra_cols]
+
+
 def walk_forward(
     bars_df: pd.DataFrame,
     model,
@@ -350,59 +529,51 @@ def walk_forward(
     warmup_bars: int = WARMUP_BARS,
     stride: Optional[int] = None,
 ) -> pd.DataFrame:
-    """Slides an evaluation point across bars_df at `stride`-bar steps.
-    At each point, runs local_infer_regime() on a trailing lookback window,
-    then computes forward outcomes at each configured horizon. Produces one
-    row per (evaluation point x horizon) -- the raw table everything else
-    reads from."""
-    stride = stride or min(horizons)
-    max_horizon = max(horizons)
-    rows = []
+    """HMM walk-forward: local_infer_regime() on trailing lookback windows,
+    scored against forward outcomes at each horizon. See _walk_forward_core
+    for the shared loop mechanics."""
+    def infer_fn(window):
+        return local_infer_regime(window, model, scaler, sustainable_state)
+    return _walk_forward_core(bars_df, infer_fn, horizons, lookback_bars, warmup_bars, stride)
 
-    for i in range(warmup_bars, len(bars_df) - max_horizon, stride):
-        window = bars_df.iloc[max(0, i - lookback_bars + 1): i + 1]
-        call = local_infer_regime(window, model, scaler, sustainable_state)
-        if call["source"] == "error":
-            continue
-        for h in horizons:
-            outcome = compute_forward_outcome(bars_df, i, h)
-            if outcome is None:
-                continue
-            rows.append({
-                "timestamp": bars_df.iloc[i]["timestamp"],
-                "regime": call["regime"],
-                "confidence": call["confidence"],
-                "hmm_state": call.get("hmm_state"),
-                "log_score": call.get("log_score"),
-                "horizon_bars": h,
-                "fwd_return_pct": outcome.fwd_return_pct,
-                "mfe_pct": outcome.mfe_pct,
-                "mae_pct": outcome.mae_pct,
-            })
 
-    return pd.DataFrame(rows, columns=[
-        "timestamp", "regime", "confidence", "hmm_state", "log_score",
-        "horizon_bars", "fwd_return_pct", "mfe_pct", "mae_pct",
-    ])
+def walk_forward_kmeans(
+    bars_df: pd.DataFrame,
+    detector,
+    symbol: str = "SPY",
+    horizons=DEFAULT_DAILY_HORIZONS,
+    lookback_bars: int = DEFAULT_DAILY_HORIZONS[-1] * 3,
+    warmup_bars: int = KMEANS_MIN_WARMUP_BARS,
+    stride: Optional[int] = None,
+) -> pd.DataFrame:
+    """K-Means walk-forward: kmeans_infer_regime() on trailing lookback
+    windows of daily bars. Same mechanics as walk_forward(), different
+    candidate. See _walk_forward_core for the shared loop."""
+    def infer_fn(window):
+        return kmeans_infer_regime(window, detector, symbol)
+    return _walk_forward_core(bars_df, infer_fn, horizons, lookback_bars, warmup_bars, stride)
 
 
 # ---------------------------------------------------------------------------
 # Scoring
 # ---------------------------------------------------------------------------
 
-def _direction_correct(regime: str, fwd_return_pct: float, choppy_threshold: float) -> Optional[bool]:
-    if regime == "SUSTAINABLE":
+def _direction_correct(direction: Optional[str], fwd_return_pct: float, choppy_threshold: float) -> Optional[bool]:
+    """direction is the ground-truth expectation for a regime label ("up",
+    "down", "flat", or None if the label has no directional expectation --
+    e.g. K-Means's volatility_spike)."""
+    if direction == "up":
         return fwd_return_pct > 0
-    if regime == "EXHAUSTED":
+    if direction == "down":
         return fwd_return_pct < 0
-    if regime == "CHOPPY":
+    if direction == "flat":
         return abs(fwd_return_pct) <= choppy_threshold
     return None
 
 
-def _regime_distribution(sub_df: pd.DataFrame) -> dict:
+def _regime_distribution(sub_df: pd.DataFrame, labels=_REGIME_LABELS) -> dict:
     stats = {}
-    for label in _REGIME_LABELS:
+    for label in labels:
         returns = sub_df.loc[sub_df["regime"] == label, "fwd_return_pct"].tolist()
         if not returns:
             stats[label] = {"n": 0}
@@ -417,20 +588,25 @@ def _regime_distribution(sub_df: pd.DataFrame) -> dict:
     return stats
 
 
-def _confidence_calibration(sub_df: pd.DataFrame) -> list[dict]:
-    # Self-referential CHOPPY "correctness" proxy -- no ground-truth label
-    # exists for CHOPPY, so this treats "return stayed inside the typical
-    # range for this horizon" as correct. A judgment call, not a validated
-    # definition; flagged in the report rather than presented as ground truth.
+def _confidence_calibration(
+    sub_df: pd.DataFrame,
+    direction_map=_HMM_DIRECTION_MAP,
+    buckets=_CONFIDENCE_BUCKETS,
+) -> list[dict]:
+    # Self-referential "flat" correctness proxy -- no ground-truth label
+    # exists for a flat/CHOPPY-style regime, so this treats "return stayed
+    # inside the typical range for this horizon" as correct. A judgment
+    # call, not a validated definition; flagged in the report rather than
+    # presented as ground truth.
     choppy_threshold = float(sub_df["fwd_return_pct"].abs().median()) if len(sub_df) else 0.0
     out = []
-    for lo, hi in _CONFIDENCE_BUCKETS:
+    for lo, hi in buckets:
         bucket = sub_df[(sub_df["confidence"] >= lo) & (sub_df["confidence"] < hi)]
         if bucket.empty:
             out.append({"range": [lo, hi], "n": 0, "directional_accuracy": None})
             continue
         correct = [
-            _direction_correct(row.regime, row.fwd_return_pct, choppy_threshold)
+            _direction_correct(direction_map.get(row.regime), row.fwd_return_pct, choppy_threshold)
             for row in bucket.itertuples()
         ]
         correct = [c for c in correct if c is not None]
@@ -439,7 +615,7 @@ def _confidence_calibration(sub_df: pd.DataFrame) -> list[dict]:
     return out
 
 
-def _split_half_significance(sub_df: pd.DataFrame) -> dict:
+def _split_half_significance(sub_df: pd.DataFrame, labels=_REGIME_LABELS) -> dict:
     """Paired t-test (src.validation.is_significant) comparing the first
     half of history against the second half's fwd_return_pct, per regime --
     is any apparent edge stable across time or a fluke of one window."""
@@ -449,7 +625,7 @@ def _split_half_significance(sub_df: pd.DataFrame) -> dict:
     median_ts = sub_df["timestamp"].median()
     first = sub_df[sub_df["timestamp"] <= median_ts]
     second = sub_df[sub_df["timestamp"] > median_ts]
-    for label in _REGIME_LABELS:
+    for label in labels:
         a = first.loc[first["regime"] == label, "fwd_return_pct"].tolist()
         b = second.loc[second["regime"] == label, "fwd_return_pct"].tolist()
         n = min(len(a), len(b))
@@ -464,11 +640,20 @@ def _split_half_significance(sub_df: pd.DataFrame) -> dict:
     return out
 
 
-def summarize(results_df: pd.DataFrame, total_bars: int) -> dict:
+def summarize(
+    results_df: pd.DataFrame,
+    total_bars: int,
+    regime_labels=_REGIME_LABELS,
+    direction_map=_HMM_DIRECTION_MAP,
+    confidence_buckets=_CONFIDENCE_BUCKETS,
+) -> dict:
     """Per-horizon: regime-bucketed forward-return distribution, confidence
     calibration, first/second-half significance check, and an explicit
     sample-size caveat (overlapping evaluation windows aren't independent
-    draws)."""
+    draws). regime_labels/direction_map/confidence_buckets default to the
+    HMM's vocabulary; pass the K-Means equivalents (_KMEANS_REGIME_LABELS,
+    _KMEANS_DIRECTION_MAP, _KMEANS_CONFIDENCE_BUCKETS) to score that
+    candidate instead."""
     summary = {"horizons": {}}
     if results_df.empty:
         return summary
@@ -485,9 +670,11 @@ def summarize(results_df: pd.DataFrame, total_bars: int) -> dict:
                 "treat raw_row_count as a diagnostic curve, approx_independent_window_count "
                 "as the real order-of-magnitude sample size"
             ),
-            "regime_distribution": _regime_distribution(sub),
-            "confidence_calibration": _confidence_calibration(sub),
-            "split_half_significance": _split_half_significance(sub),
+            "regime_distribution": _regime_distribution(sub, labels=regime_labels),
+            "confidence_calibration": _confidence_calibration(
+                sub, direction_map=direction_map, buckets=confidence_buckets,
+            ),
+            "split_half_significance": _split_half_significance(sub, labels=regime_labels),
         }
     return summary
 
@@ -503,25 +690,35 @@ def write_report(
     out_dir: Optional[Path] = None,
     run_date: Optional[str] = None,
     parity_results: Optional[list[dict]] = None,
+    candidate_slug: str = "",
+    description: Optional[str] = None,
 ) -> tuple[Path, Path]:
+    """candidate_slug/description default to "" / None, which reproduces
+    the original HMM-report filenames/text exactly. Pass candidate_slug="kmeans"
+    (plus a K-Means-specific description) to write a comparable report for
+    that candidate without colliding with the HMM's same-day report."""
     out_dir = out_dir or (Path(__file__).resolve().parent.parent / "reports")
     out_dir.mkdir(parents=True, exist_ok=True)
     run_date = run_date or datetime.now().strftime("%Y-%m-%d")
 
-    csv_path = out_dir / f"regime_backtest_{symbol}_{run_date}.csv"
-    md_path = out_dir / f"regime_backtest_{symbol}_{run_date}.md"
+    slug_part = f"_{candidate_slug}" if candidate_slug else ""
+    csv_path = out_dir / f"regime_backtest_{symbol}{slug_part}_{run_date}.csv"
+    md_path = out_dir / f"regime_backtest_{symbol}{slug_part}_{run_date}.md"
 
     results_df.to_csv(csv_path, index=False)
 
-    lines = [
-        f"# Regime Backtest — {symbol} ({run_date})",
-        "",
+    default_description = (
         "Offline walk-forward scoring of src.ml_signal's HMM regime classifier "
         "against realized forward returns, using local inference against the "
         "current archived model. Re-run periodically as more "
         "market_data.bars_5min history accumulates -- this is a perishable "
         "read, not a final verdict (only ~7 weeks of 5-min-bar depth exists "
-        "as of this writing).",
+        "as of this writing)."
+    )
+    lines = [
+        f"# Regime Backtest — {symbol} ({run_date})",
+        "",
+        description or default_description,
         "",
     ]
     for horizon, stats in summary.get("horizons", {}).items():
