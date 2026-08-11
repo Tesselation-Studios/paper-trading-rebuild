@@ -277,9 +277,18 @@ class OvernightHarness:
             log.info("Top config: %s (score=%.4f)",
                      result.scored_variants[0].variant.variant_id,
                      result.scored_variants[0].score)
-            log.info("Catch rate: %.2f | FP rate: %.2f | Return: %.2f%%",
-                     result.scored_variants[0].catch_rate,
-                     result.scored_variants[0].false_positive_rate,
+            # catch_rate/false_positive_rate are fractions of total discovered
+            # signals (thousands of raw pattern matches), not of trades taken --
+            # commonly < 0.005, which %.2f rounds to a display of "0.00",
+            # indistinguishable from a true zero. 2026-08-11: this is exactly
+            # what happened in the Aug 9/10 overnight cycle -- catch_rate=0.001
+            # displayed as "0.00" and got written up as "zero caught," when the
+            # stored value (and false_positive_rate=0.0) actually showed every
+            # trade taken matched a discovered signal. %.3f%% (percentage,
+            # 3 decimals) keeps small-but-real values visibly distinct from zero.
+            log.info("Catch rate: %.3f%% | FP rate: %.3f%% | Return: %.2f%%",
+                     result.scored_variants[0].catch_rate * 100,
+                     result.scored_variants[0].false_positive_rate * 100,
                      result.scored_variants[0].total_return_pct)
         if result.errors:
             log.warning("Errors (%d):", len(result.errors))
