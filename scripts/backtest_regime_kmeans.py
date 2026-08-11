@@ -25,7 +25,7 @@ or touch decision_heuristics.md.
 
 Usage:
     python3 scripts/backtest_regime_kmeans.py --symbol SPY
-    python3 scripts/backtest_regime_kmeans.py --symbol SPY --k 4 --train-frac 0.7
+    python3 scripts/backtest_regime_kmeans.py --symbol SPY --k 5 --train-frac 0.7
 """
 import argparse
 import sys
@@ -107,7 +107,7 @@ def main(args: argparse.Namespace) -> int:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--symbol", default="SPY", help="Only symbol this data path is proven against")
-    parser.add_argument("--k", type=int, default=4, help="K-Means cluster count (default matches the historical training run)")
+    parser.add_argument("--k", type=int, default=5, help="K-Means cluster count (5 to match REGIME_LABELS and the live production default -- see retrain_regime_kmeans.py's docstring for why k=4 is structurally wrong)")
     parser.add_argument("--train-frac", type=float, default=0.7,
                          help="Fraction of history used to fit the detector; the rest is held out for evaluation")
     parser.add_argument("--horizons", default=",".join(str(h) for h in regime_backtest.DEFAULT_DAILY_HORIZONS),

@@ -125,3 +125,57 @@ class TestGetKmeansRegime:
         result = kmeans_regime.get_kmeans_regime("SPY")
         assert result["source"] == "error"
         assert "not enough daily bars" in result["error"]
+
+
+class _FakeKMeansModel:
+    """Stands in for a fitted sklearn KMeans -- _assign_labels() only ever
+    reads .cluster_centers_, so this is the minimal fake needed to exercise
+    it directly without going through a real .fit()."""
+    def __init__(self, cluster_centers):
+        self.cluster_centers_ = np.array(cluster_centers)
+
+
+class TestAssignLabelsReachability:
+    """Regression test for the k=4 bug: _assign_labels() gives momentum_bull/
+    momentum_bear/volatility_spike one cluster each, then splits whatever's
+    left between mean_reversion/low_vol_drift. At k=4 there's exactly one
+    cluster left over, so those two labels are structurally mutually
+    exclusive -- confirmed against the live k=4 model, which never had a
+    mean_reversion cluster. At k=5 there are two clusters left over, each
+    independently eligible for either label -- this doesn't guarantee both
+    appear on real data, but confirms it's no longer structurally
+    impossible, using hand-picked, well-separated centroids."""
+
+    def test_k5_can_reach_all_five_labels(self):
+        detector = regime_detector.RegimeDetector(k=5, model_path="")
+        detector._feature_names = ["SPY_mom_20d", "SPY_rsi_14", "SPY_atr_pct", "SPY_vol_trend"]
+        # columns: [mom_20d, rsi_14, atr_pct, vol_trend]
+        detector._kmeans = _FakeKMeansModel([
+            [0.10, 70, 0.010, 0.0],   # highest momentum -> momentum_bull
+            [-0.10, 30, 0.010, 0.0],  # lowest momentum -> momentum_bear
+            [0.00, 50, 0.050, 0.0],   # highest ATR -> volatility_spike
+            [0.001, 50, 0.001, 0.0],  # near-zero momentum + lowest remaining ATR -> low_vol_drift
+            [0.03, 55, 0.020, 0.0],   # moderate momentum/ATR, fails the low-vol threshold -> mean_reversion
+        ])
+        detector._assign_labels()
+
+        assert len(detector._centroid_labels) == 5
+        assert set(detector._centroid_labels.values()) == set(regime_detector.REGIME_LABELS.values())
+
+    def test_k4_structurally_cannot_reach_both_mean_reversion_and_low_vol_drift(self):
+        """Documents the bug this session fixed (k=4 -> k=5 as the live
+        default) -- kept as a regression guard in case k=4 is ever
+        reintroduced as a default without revisiting _assign_labels."""
+        detector = regime_detector.RegimeDetector(k=4, model_path="")
+        detector._feature_names = ["SPY_mom_20d", "SPY_rsi_14", "SPY_atr_pct", "SPY_vol_trend"]
+        detector._kmeans = _FakeKMeansModel([
+            [0.10, 70, 0.010, 0.0],   # momentum_bull
+            [-0.10, 30, 0.010, 0.0],  # momentum_bear
+            [0.00, 50, 0.050, 0.0],   # volatility_spike
+            [0.001, 50, 0.001, 0.0],  # the one remaining cluster
+        ])
+        detector._assign_labels()
+
+        assert len(detector._centroid_labels) == 4
+        labels = set(detector._centroid_labels.values())
+        assert not {"mean_reversion", "low_vol_drift"}.issubset(labels)

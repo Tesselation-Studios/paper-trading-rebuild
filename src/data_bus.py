@@ -509,8 +509,14 @@ class DbWriteQueue:
             for table, rows in grouped.items():
                 if not rows:
                     continue
-                # Build INSERT dynamically from the keys of the first row
-                columns = list(rows[0].keys())
+                # Build INSERT from the union of keys across every row in
+                # this batch, not just rows[0] -- this table sees rows of
+                # genuinely different shapes (full stock quotes vs. bar-only
+                # vs. minimal crypto rows) in the same 15s flush, and taking
+                # only rows[0]'s keys silently dropped every other row's
+                # extra columns whenever a narrower row happened to sort
+                # first (confirmed: no error, no log, just missing data).
+                columns = list(dict.fromkeys(k for row in rows for k in row))
                 placeholders = ", ".join(["?" for _ in columns])
                 col_str = ", ".join(columns)
                 sql = f"INSERT INTO {table} ({col_str}) VALUES ({placeholders})"
@@ -1693,13 +1699,18 @@ def _ensure_cache_tables(conn):
     2026-07-24: cache.db has sat empty since this repo's rebuild — the
     original schema-init function never got ported (see
     Tesselation-Studios/paper-trading-teams's data_bus.py for the archived
-    version, which also had prices/news/sentiment/watchlist tables — those
-    aren't wired to any read/write path in this repo currently, so left out
-    here rather than creating dead tables). Scoped to what's actually
-    used: fundamentals (per-ticker, matches _db_read/_sqlite_persist's
+    version, which also had prices/news/sentiment/watchlist tables). Scoped
+    initially to fundamentals (per-ticker, matches _db_read/_sqlite_persist's
     existing column expectations) and macro (global snapshots, JSON blob —
     FRED/LoneStarOracle's field set is wide and shifts, not worth a rigid
-    per-field schema for a cache table)."""
+    per-field schema for a cache table).
+
+    2026-08-11: added `prices`, matching the live shared/cache.db schema.
+    DbWriteQueue.enqueue("prices", ...) IS wired to real read/write paths
+    (quote/bar/crypto scrapers all feed it) despite the note above -- the
+    live table just predates this function and was created out-of-band, so
+    a fresh/CI environment with an empty cache.db would otherwise 500 on
+    every price flush with "no such table: prices" forever."""
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS fundamentals (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1714,6 +1725,21 @@ def _ensure_cache_tables(conn):
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             data TEXT NOT NULL,
             source TEXT,
+            fetched_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS prices (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker TEXT,
+            close REAL,
+            high REAL,
+            low REAL,
+            open REAL,
+            volume INTEGER,
+            rsi REAL,
+            macd_line REAL,
+            macd_signal REAL,
+            macd_histogram REAL,
+            ma20 REAL,
             fetched_at TEXT NOT NULL
         );
     """)

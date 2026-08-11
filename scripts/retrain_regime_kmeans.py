@@ -6,10 +6,14 @@ Steps:
      (writes to market_data.bars_1d, ON CONFLICT DO NOTHING -- idempotent).
      Hits the live Alpaca API and writes to the shared prod Postgres DB.
   2. Load full SPY market_data.bars_1d history.
-  3. Fit a fresh RegimeDetector(k=4) on all of it -- unlike Phase C's
+  3. Fit a fresh RegimeDetector(k=5) on all of it -- unlike Phase C's
      evaluation harness (scripts/backtest_regime_kmeans.py), which holds out
      30% for honest offline scoring, production training uses all available
-     history.
+     history. k=5 (not 4) matters: _assign_labels() gives momentum_bull/
+     momentum_bear/volatility_spike one cluster each, then splits whatever's
+     left between mean_reversion/low_vol_drift -- at k=4 there's only one
+     cluster left, so those two labels are structurally mutually exclusive
+     (confirmed: the k=4 live model never had a mean_reversion cluster).
   4. Archive it via src.kmeans_regime.archive_detector (versioned, local --
      no remote worker involved, unlike scripts/retrain_regime.py's HMM).
 
@@ -19,7 +23,7 @@ fit (no GPU worker round-trip), so keeping the model current daily is easy.
 
 Usage:
     python3 scripts/retrain_regime_kmeans.py
-    python3 scripts/retrain_regime_kmeans.py --symbol SPY --k 4
+    python3 scripts/retrain_regime_kmeans.py --symbol SPY --k 5
 """
 import argparse
 import subprocess
@@ -81,7 +85,7 @@ def main(args: argparse.Namespace) -> int:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--symbol", default="SPY")
-    parser.add_argument("--k", type=int, default=4, help="K-Means cluster count (matches the historical training run)")
+    parser.add_argument("--k", type=int, default=5, help="K-Means cluster count (5 to match REGIME_LABELS -- k=4 structurally cannot reach both mean_reversion and low_vol_drift, see _assign_labels)")
     return parser.parse_args()
 
 
