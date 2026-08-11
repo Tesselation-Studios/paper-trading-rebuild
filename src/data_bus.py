@@ -5722,21 +5722,20 @@ if _mcp_tools_enabled():
 
     @mcp_server.tool()
     async def get_market_regime() -> dict:
-        """Get current market regime from the real gRPC-trained HMM (SUSTAINABLE/EXHAUSTED/CHOPPY),
-        retrained weekly on SPY (stonks-regime-retrain cron), features refreshed daily."""
+        """Get current SPY market regime from a local K-Means classifier
+        (momentum_bull/momentum_bear/mean_reversion/volatility_spike/low_vol_drift),
+        retrained daily on market_data.bars_1d (stonks-regime-kmeans-retrain cron).
+        Regime only changes once a new daily bar lands -- not an intraday signal.
+        Replaced the HMM (SUSTAINABLE/EXHAUSTED/CHOPPY) 2026-08-10 per an offline
+        walk-forward evaluation showing more statistically significant edge."""
         cache_key = "ml_signal:SPY"
         cached = _cache.get(cache_key, TTL["technical_scan"])
         if cached is not None:
             return {"market_regime": cached, "source": "cache"}
         try:
-            import pandas as pd
-            bars_path = SRC_DIR.parent / "shared" / "cache" / "bars" / "SPY.parquet"
-            if not bars_path.exists():
-                return {"market_regime": None, "error": f"no SPY bars at {bars_path}"}
-            df = pd.read_parquet(bars_path)
-            from src import ml_signal
-            result = await ml_signal.get_regime("SPY", df)
-            if result.get("source") == "grpc":
+            from src import kmeans_regime
+            result = kmeans_regime.get_kmeans_regime("SPY")
+            if result.get("source") == "local":
                 _cache.set(cache_key, result)
                 return {"market_regime": result, "source": "live"}
             return {"market_regime": None, "error": result.get("error", "regime signal unavailable")}
